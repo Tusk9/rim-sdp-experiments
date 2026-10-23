@@ -1,0 +1,20 @@
+# environment
+.venv-rim/
+__pycache__/
+*.pyc
+
+# large or licensed data — re-download with download_assets.py
+assets/
+data/
+
+# run outputs: metrics, adapters, and MODEL OUTPUTS ON HARMFUL PROMPTS — never commit
+runs/
+
+# secrets
+*.pem
+.env
+*token*
+
+# OS / editor
+.DS_Store
+.vscode/
