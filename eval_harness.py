@@ -256,18 +256,45 @@ def load_gpqa(cfg: Config) -> list[dict]:
     return items
 
 
+def _aime_gold(r: dict):
+    """Find the integer answer in an AIME row; datasets name/store it differently."""
+    for k in ("answer", "Answer", "expected_answer", "final_answer", "target", "gold"):
+        v = r.get(k)
+        if v is not None and str(v).strip() not in ("", "None"):
+            m = re.findall(r"-?\d+", str(v))
+            if m:
+                return int(m[-1]), k
+    for k in ("solution", "Solution", "reasoning"):      # e.g. answer only inside \boxed{}
+        v = r.get(k)
+        if v:
+            b = last_boxed(str(v))
+            src = b if b is not None else str(v).split("####")[-1]
+            m = re.findall(r"-?\d+", src)
+            if m:
+                return int(m[-1]), f"{k}(boxed)" if b is not None else f"{k}(last int)"
+    return None, None
+
+
 def load_aime(path: str, name: str) -> list[dict]:
     from datasets import load_dataset
     ds = load_dataset(path)
     split = "test" if "test" in ds else list(ds.keys())[0]
-    items = []
+    items, sources, missing = [], {}, []
     for i, r in enumerate(ds[split]):
         prob = r.get("problem") or r.get("question") or r.get("Problem")
-        ans = r.get("answer") if r.get("answer") is not None else r.get("Answer")
+        gold, src = _aime_gold(r)
+        if gold is None:
+            missing.append(i)
+            continue
+        sources[src] = sources.get(src, 0) + 1
         items.append({"id": f"{name}-{r.get('id', i)}",
                       "user": str(prob).strip() + "\nPlease reason step by step, and put your "
                               "final answer within \\boxed{}.",
-                      "gold": int(str(ans).strip().lstrip("0") or "0")})
+                      "gold": gold})
+    print(f"  {name}: {len(items)} problems, answers from {sources}, columns {ds[split].column_names}")
+    if missing:
+        raise SystemExit(f"{name}: no answer found for rows {missing[:10]} "
+                         f"(columns {ds[split].column_names}) — tell Claude the column names")
     return items
 
 
