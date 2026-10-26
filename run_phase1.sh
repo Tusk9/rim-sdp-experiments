@@ -60,7 +60,13 @@ if ! done_ env; then
   echo "== [0] environment"
   nvidia-smi --query-gpu=name,memory.total --format=csv
   # vLLM 0.15.1 supports Python 3.10-3.13; some AMIs default python3 to 3.14
-  PY="${PYTHON_BIN:-$(command -v python3.12 || command -v python3.11 || command -v python3.10 || echo python3)}"
+  PY="${PYTHON_BIN:-$(command -v python3.12 || command -v python3.11 || command -v python3.10 || true)}"
+  if [ -z "$PY" ]; then      # e.g. Ubuntu 26.04 ships only 3.14: fetch a standalone 3.12 via uv
+    echo "   no Python 3.10-3.13 found; installing 3.12 with uv"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    "$HOME/.local/bin/uv" python install 3.12
+    PY="$("$HOME/.local/bin/uv" python find 3.12)"
+  fi
   echo "   using $PY ($($PY --version))"
   if ! "$PY" -c "import ensurepip" 2>/dev/null; then
     sudo apt-get update -y && sudo apt-get install -y "$(basename "$PY")-venv"
