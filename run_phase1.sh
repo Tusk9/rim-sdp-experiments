@@ -21,8 +21,8 @@
 # Required env:  HF_TOKEN  OPENAI_API_KEY
 # Optional env:  JUDGE_RPM (default 9: your OpenAI requests/min limit minus a bit)
 #                HF_SYNC_REPO (e.g. Trilok6767/rim-sdp-runs -> private backup; needs a
-#                              WRITE token)  AUTO_STOP (default 1: shut the instance down
-#                              5 min after the script ends, to save credits)
+#                              WRITE token)  AUTO_STOP (default 0. 1 = shut the instance down
+#                              5 min after a SUCCESSFUL finish; never on failure)
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -31,7 +31,7 @@ cd "$(dirname "$0")"
 : "${OPENAI_API_KEY:?export OPENAI_API_KEY=sk-...   (judge for HEx-PHI)}"
 JUDGE_RPM="${JUDGE_RPM:-9}"
 HF_SYNC_REPO="${HF_SYNC_REPO:-}"
-AUTO_STOP="${AUTO_STOP:-1}"
+AUTO_STOP="${AUTO_STOP:-0}"   # 1 = shut down after a SUCCESSFUL finish only
 RUN_NAME="amsft_g0_L16384_eb64_s3407"
 # HEx-PHI last: judging is API-bound, so the GPU work finishes first
 BENCH="safetybench gpqa aime24 aime25 hexphi"
@@ -71,8 +71,8 @@ on_exit() {
   stop_bg_sync
   sync_hf
   echo "== run_phase1.sh exit code $code at $(date -u +%FT%TZ)"
-  if [ "$AUTO_STOP" = "1" ]; then
-    echo "== instance will shut down in 5 min to save credits (cancel: sudo shutdown -c)"
+  if [ "$AUTO_STOP" = "1" ] && [ "$code" = "0" ]; then
+    echo "== Phase 1 finished: instance will shut down in 5 min (cancel: sudo shutdown -c)"
     sudo shutdown -h +5 || true
   fi
 }
