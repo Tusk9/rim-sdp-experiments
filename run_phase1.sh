@@ -14,6 +14,9 @@
 #
 # RESUMABLE: each finished step writes runs/phase1/<step>.done and is skipped on
 # re-run. Training resumes from its last checkpoint. Just run the script again.
+# ACROSS MACHINES: with HF_SYNC_REPO set, runs/ (markers, results, responses, training
+# checkpoints) is backed up every 15 min and restored on a fresh instance, so a new
+# machine continues where the last one stopped. env/data are per-machine and always rerun.
 #
 # Required env:  HF_TOKEN  OPENAI_API_KEY
 # Optional env:  JUDGE_RPM (default 9: your OpenAI requests/min limit minus a bit)
@@ -34,19 +37,39 @@ RUN_NAME="amsft_g0_L16384_eb64_s3407"
 BENCH="safetybench gpqa aime24 aime25 hexphi"
 export HF_TOKEN OPENAI_API_KEY
 
-mkdir -p runs/phase1
+mkdir -p runs/phase1 .local_state
 exec > >(tee -a runs/phase1/phase1.log) 2>&1
 echo "== run_phase1.sh start $(date -u +%FT%TZ)  JUDGE_RPM=$JUDGE_RPM  AUTO_STOP=$AUTO_STOP"
 
 done_() { [ -f "runs/phase1/$1.done" ]; }
+local_done() { [ -f ".local_state/$1.done" ]; }       # per-machine steps (not synced)
 sync_hf() {
   if [ -n "$HF_SYNC_REPO" ] && [ -f .venv-rim/bin/python ]; then
-    .venv-rim/bin/python sync_to_hf.py --repo "$HF_SYNC_REPO" || echo "WARN: HF sync failed (continuing)"
+    # flock: skip if a sync is already running (background loop vs step-end sync)
+    flock -n /tmp/rim_hfsync.lock .venv-rim/bin/python sync_to_hf.py --repo "$HF_SYNC_REPO" \
+      || echo "WARN: HF sync skipped/failed (continuing)"
   fi
 }
 mark() { touch "runs/phase1/$1.done"; echo "== DONE $1 $(date -u +%FT%TZ)"; sync_hf; }
+mark_local() { touch ".local_state/$1.done"; echo "== DONE $1 (this machine) $(date -u +%FT%TZ)"; }
+BG_SYNC=""
+start_bg_sync() {
+  [ -n "$HF_SYNC_REPO" ] || return 0
+  # detached from stdout so it never holds the log pipe open
+  ( while sleep "${SYNC_EVERY_S:-900}"; do sync_hf; done ) >/dev/null 2>&1 &
+  BG_SYNC=$!
+}
+stop_bg_sync() {
+  if [ -n "$BG_SYNC" ]; then
+    pkill -P "$BG_SYNC" 2>/dev/null || true      # its sleep / sync children
+    kill "$BG_SYNC" 2>/dev/null || true
+  fi
+  BG_SYNC=""
+}
 on_exit() {
   code=$?
+  stop_bg_sync
+  sync_hf
   echo "== run_phase1.sh exit code $code at $(date -u +%FT%TZ)"
   if [ "$AUTO_STOP" = "1" ]; then
     echo "== instance will shut down in 5 min to save credits (cancel: sudo shutdown -c)"
@@ -56,7 +79,7 @@ on_exit() {
 trap on_exit EXIT
 
 # ---- 0 env ------------------------------------------------------------------
-if ! done_ env; then
+if ! local_done env; then
   echo "== [0] environment"
   nvidia-smi --query-gpu=name,memory.total --format=csv
   # vLLM 0.15.1 supports Python 3.10-3.13; some AMIs default python3 to 3.14
@@ -74,18 +97,27 @@ if ! done_ env; then
   rm -rf .venv-rim
   PYTHON_BIN="$PY" ./setup_env.sh
   .venv-rim/bin/pip install -q openai
-  mark env
+  mark_local env
 fi
 # shellcheck disable=SC1091
 source .venv-rim/bin/activate
 
+# ---- restore progress from the HF backup (fresh machine only) ----------------
+if [ -n "$HF_SYNC_REPO" ] && ! local_done restore; then
+  echo "== restoring runs/ from $HF_SYNC_REPO (if it exists)"
+  python sync_to_hf.py --repo "$HF_SYNC_REPO" --restore || echo "WARN: restore failed (starting fresh)"
+  ls runs/phase1/*.done 2>/dev/null | sed 's/^/   restored marker: /' || true
+  mark_local restore
+fi
+
 # ---- 1 data -----------------------------------------------------------------
-if ! done_ data; then
+if ! local_done data; then
   echo "== [1] downloads + data prep"
   python download_assets.py
   python prep_am_data.py
-  mark data
+  mark_local data
 fi
+start_bg_sync      # back up runs/ every 15 min from here on
 
 # ---- 2 training smoke test --------------------------------------------------
 if ! done_ train_smoke; then
@@ -121,9 +153,9 @@ if ! done_ train; then
   echo "== [5] AM-SFT training (gamma = 0)"
   if [ -f "$TRAIN_DIR/ckpt/state.pt" ] && [ ! -d "$TRAIN_DIR/adapter" ]; then
     echo "   resuming from $TRAIN_DIR/ckpt"
-    python train_lora.py --resume "$TRAIN_DIR"
+    python train_lora.py --resume "$TRAIN_DIR" --save-every 5
   elif [ ! -d "$TRAIN_DIR/adapter" ]; then
-    python train_lora.py --run-name "$RUN_NAME"
+    python train_lora.py --run-name "$RUN_NAME" --save-every 5
   fi
   [ -d "$TRAIN_DIR/adapter" ] || { echo "ERROR: no adapter after training"; exit 1; }
   mark train

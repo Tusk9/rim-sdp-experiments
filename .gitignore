@@ -18,3 +18,6 @@ runs/
 # OS / editor
 .DS_Store
 .vscode/
+
+# per-machine run state
+.local_state/
