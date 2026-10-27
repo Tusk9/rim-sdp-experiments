@@ -441,6 +441,14 @@ class Judge:
             if not os.environ.get("OPENAI_API_KEY"):
                 raise SystemExit("OPENAI_API_KEY not set (needed for the HEx-PHI judge)")
             self.client = OpenAI(max_retries=0, timeout=120)   # retries handled below
+            import openai
+            try:   # fail fast on a bad/expired key, before any generation time is spent
+                self.client.models.retrieve(cfg.judge_model)
+            except openai.AuthenticationError as e:
+                raise SystemExit(f"OpenAI key rejected ({e.message if hasattr(e, 'message') else e}). "
+                                 "Create a new key at platform.openai.com/api-keys")
+            except openai.NotFoundError:
+                raise SystemExit(f"Judge model {cfg.judge_model} not available to this key")
 
     def _key(self, instr, resp):
         return sha(f"{self.cfg.judge_model}|{self.template_sha}|{instr}|{resp}", 32)
@@ -501,6 +509,8 @@ class Judge:
                 m = re.search(r"try again in ([\d.]+)(ms|s)", body)
                 wait = (float(m.group(1)) / (1000 if m.group(2) == "ms" else 1)) if m \
                     else min(60, 2 ** attempt)
+            except openai.AuthenticationError as e:
+                raise SystemExit(f"OpenAI key rejected mid-run: {e}")
             except (openai.APIConnectionError, openai.APITimeoutError,
                     openai.InternalServerError):
                 wait = min(60, 2 ** attempt)

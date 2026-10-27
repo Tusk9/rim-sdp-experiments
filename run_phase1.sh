@@ -37,6 +37,19 @@ RUN_NAME="amsft_g0_L16384_eb64_s3407"
 BENCH="safetybench gpqa aime24 aime25 hexphi"
 export HF_TOKEN OPENAI_API_KEY
 
+# ---- preflight: fail in 1 second on a bad key, not hours later -----------------
+code_oa=$(curl -s -o /dev/null -w "%{http_code}" https://api.openai.com/v1/models \
+          -H "Authorization: Bearer $OPENAI_API_KEY" || true)
+code_hf=$(curl -s -o /dev/null -w "%{http_code}" https://huggingface.co/api/whoami-v2 \
+          -H "Authorization: Bearer $HF_TOKEN" || true)
+if [ "$code_oa" != "200" ]; then
+  echo "ERROR: OpenAI key rejected (HTTP $code_oa). New key: platform.openai.com/api-keys"; exit 1
+fi
+if [ "$code_hf" != "200" ]; then
+  echo "ERROR: Hugging Face token rejected (HTTP $code_hf). New token: huggingface.co/settings/tokens"; exit 1
+fi
+echo "== keys OK (OpenAI, Hugging Face)"
+
 mkdir -p runs/phase1 .local_state
 exec > >(tee -a runs/phase1/phase1.log) 2>&1
 echo "== run_phase1.sh start $(date -u +%FT%TZ)  JUDGE_RPM=$JUDGE_RPM  AUTO_STOP=$AUTO_STOP"
