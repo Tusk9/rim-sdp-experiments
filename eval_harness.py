@@ -75,7 +75,10 @@ class Config:
     # MY CHOICE: the model's own generation_config.json (Qwen2.5-Instruct ships
     #   temperature 0.7, top_p 0.8, top_k 20, repetition_penalty 1.05). Sampling is implied by
     #   AIME "mean +- sd over 8 runs". Same settings for every benchmark, per-request seeds.
-    decoding: str = "model_default"        # "model_default" | "greedy"
+    decoding: str = "model_default"        # "model_default" | "greedy" | "r1"
+    # "r1" = standard decoding for R1-distilled reasoning models: temperature 0.6, top_p 0.95,
+    #   no top_k, no repetition penalty. Added after AM-SFT looped under model_default
+    #   (87-96% of truncated reasoning answers ended in exact repeats).
     max_new_tokens: int = 16_384           # MY CHOICE: = training max_seq_len
     max_model_len: int = 20_480            # prompt + response budget for vLLM
     aime_runs: int = 8                     # paper: 8 runs
@@ -538,8 +541,14 @@ class Judge:
 
 
 # -------------------------------- scoring ------------------------------------
+def ends_in_loop(text: str, tail: int = 300, window: int = 6000) -> bool:
+    """True if the last `tail` chars already occurred in the preceding window (degenerate repeat)."""
+    return len(text) > window and text[-tail:] in text[-window:-tail]
+
+
 def think_flags(text: str) -> dict:
-    return {"think_used": THINK_OPEN in text, "think_closed": THINK_CLOSE in text}
+    return {"think_used": THINK_OPEN in text, "think_closed": THINK_CLOSE in text,
+            "loop": ends_in_loop(text)}
 
 
 def score_hexphi(items, gens, judge: Judge, cfg: Config) -> tuple[dict, list]:
@@ -604,6 +613,9 @@ def score_mc(items, gens) -> tuple[dict, list]:
          "parse_fail": rate(sum(r["pred"] is None for r in rows), n),
          "think_adoption": rate(sum(r["think_used"] for r in rows), n),
          "truncated_at_max_tokens": rate(sum(r["finish"] == "length" for r in rows), n),
+         "ends_in_loop": rate(sum(r["loop"] for r in rows), n),
+         "accuracy_among_finished": rate(sum(bool(r["correct"]) for r in graded if r["finish"] != "length"),
+                                         sum(1 for r in graded if r["finish"] != "length")),
          "mean_tokens": round(float(np.mean([r["n_tokens"] for r in rows])), 1) if rows else None}
     if graded:
         cats = sorted({str(r["category"]) for r in graded})
@@ -636,6 +648,9 @@ def score_aime(items, gens_by_run) -> tuple[dict, list]:
             "parse_fail": rate(sum(r["pred"] is None for r in rows), n),
             "think_adoption": rate(sum(r["think_used"] for r in rows), n),
             "truncated_at_max_tokens": rate(sum(r["finish"] == "length" for r in rows), n),
+            "ends_in_loop": rate(sum(r["loop"] for r in rows), n),
+            "accuracy_among_finished": rate(sum(r["correct"] for r in rows if r["finish"] != "length"),
+                                            sum(1 for r in rows if r["finish"] != "length")),
             "mean_tokens": round(float(np.mean([r["n_tokens"] for r in rows])), 1)}, rows
 
 
@@ -657,7 +672,8 @@ def main() -> int:
     ap.add_argument("--backend", choices=["vllm", "hf"])
     ap.add_argument("--judge-backend", choices=["openai", "mock"])
     ap.add_argument("--judge-model"); ap.add_argument("--judge-prompt-file")
-    ap.add_argument("--decoding", choices=["model_default", "greedy"])
+    ap.add_argument("--decoding", choices=["model_default", "greedy", "r1"])
+    ap.add_argument("--max-model-len", type=int, help="vLLM context budget (Qwen2.5-3B max 32768)")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--max-new-tokens", type=int)
@@ -674,7 +690,7 @@ def main() -> int:
 
     cfg = Config()
     for k in ("backend", "judge_backend", "judge_model", "judge_prompt_file", "decoding",
-              "limit", "max_new_tokens", "aime_runs", "safetybench_answers", "gpqa_file",
+              "limit", "max_new_tokens", "max_model_len", "aime_runs", "safetybench_answers", "gpqa_file",
               "hexphi_dir", "safetybench_file", "hf_batch_size", "judge_rpm",
               "judge_concurrency"):
         v = getattr(a, k)
@@ -709,10 +725,18 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     model_dir = merge_adapter(a.model, a.adapter, cfg.out_root) if a.adapter else a.model
 
-    decode = gen_defaults(model_dir) if cfg.decoding == "model_default" else \
-        {"temperature": 0.0, "top_p": 1.0, "top_k": -1, "repetition_penalty": 1.0}
+    if cfg.decoding == "model_default":
+        decode = gen_defaults(model_dir)
+    elif cfg.decoding == "r1":
+        decode = {"temperature": 0.6, "top_p": 0.95, "top_k": -1, "repetition_penalty": 1.0}
+    else:
+        decode = {"temperature": 0.0, "top_p": 1.0, "top_k": -1, "repetition_penalty": 1.0}
     if cfg.backend == "hf" and decode.get("top_k", 0) < 0:
         decode["top_k"] = 0
+    if cfg.max_new_tokens >= cfg.max_model_len:
+        raise SystemExit(f"max_new_tokens {cfg.max_new_tokens} must be < max_model_len {cfg.max_model_len}")
+    if cfg.decoding != "model_default":
+        flags.append(f"decoding={cfg.decoding} {decode}")
 
     t_all = time.time()
     _gen = {}
