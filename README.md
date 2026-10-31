@@ -9,9 +9,15 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 | Phase | What | Status |
 |---|---|---|
 | 0 | Environment, data prep, training and eval smoke tests | ✅ done |
-| 1 | Base eval → AM-SFT LoRA (γ = 0) → eval: does RIM reproduce? | 🔄 running on GPU |
+| 1 | Base eval → AM-SFT LoRA (γ = 0) → eval: does RIM reproduce? | ✅ done: see [PHASE1_RESULTS.md](PHASE1_RESULTS.md) |
+| 1b | Diagnose AM-SFT looping; rerun with effective batch 8 | ⏭ next |
 | 2 | Safety-direction extraction + SDP training (γ = 0.5, L19–L32) | planned |
 | 3 | Reasoning-format study (full CoT / Chain of Draft / no tags / answer only) | planned |
+
+**Phase 1 headline:** HEx-PHI harmful rises from ~2% to ~50% after benign reasoning SFT (harm almost
+entirely in `<think>` responses), but the fine-tuned 3B model also falls into repetition loops on
+GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open questions in
+[PHASE1_RESULTS.md](PHASE1_RESULTS.md).
 
 ## Pipeline
 
@@ -22,8 +28,9 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 | `prep_am_data.py` | first 10k AM-DeepSeek examples → Qwen chat template, prompt masking verified per example, length stats |
 | `train_lora.py` | LoRA SFT (r=16, α=16, lr 5e-5 cosine, 28 warmup, 3 epochs, 16k context, bf16); token-exact gradient accumulation, chunked loss, resumable checkpoints, `--smoke` mode |
 | `eval_harness.py` | HEx-PHI (GPT-4o-mini judge), SafetyBench, GPQA, AIME 24/25 (8 runs) via vLLM; logs think adoption and harm rate conditional on thinking; `--smoke` mode |
-| `run_phase1.sh` | one resumable command for all of Phase 1 |
-| `sync_to_hf.py` | backs up metrics and adapters to a private Hugging Face repo |
+| `run_phase1.sh` | one resumable command for all of Phase 1 (key preflight, cross-machine resume via HF backup) |
+| `run_recheck.sh` | reasoning re-check: GPQA/AIME (+ optional HEx-PHI) under R1-style decoding, loop metrics |
+| `sync_to_hf.py` | backs up / restores runs (metrics, adapters, checkpoints, responses) to a private Hugging Face repo |
 
 ## Reproduce
 
