@@ -10,7 +10,7 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 |---|---|---|
 | 0 | Environment, data prep, training and eval smoke tests | ✅ done |
 | 1 | Base eval → AM-SFT LoRA (γ = 0) → eval: does RIM reproduce? | ✅ done: see [PHASE1_RESULTS.md](PHASE1_RESULTS.md) |
-| 1b | Diagnose AM-SFT looping; rerun with effective batch 8 | ⏭ next |
+| 1b | Looping diagnosed as over-training (training data has ~0% loops). Retrain on the same trajectory, evaluate the epoch-1 snapshot (step 157) | ⏭ running (`run_phase1b.sh`) |
 | 2 | Safety-direction extraction + SDP training (γ = 0.5, L19–L32) | planned |
 | 3 | Reasoning-format study (full CoT / Chain of Draft / no tags / answer only) | planned |
 
@@ -26,9 +26,11 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `setup_env.sh` | venv with the paper's versions (PyTorch 2.9.1, Transformers 4.57.6, PEFT 0.18.1, vLLM 0.15.1, scikit-learn 1.8.0) |
 | `download_assets.py` | model + datasets pinned to exact commit SHAs; reports gated repos |
 | `prep_am_data.py` | first 10k AM-DeepSeek examples → Qwen chat template, prompt masking verified per example, length stats |
-| `train_lora.py` | LoRA SFT (r=16, α=16, lr 5e-5 cosine, 28 warmup, 3 epochs, 16k context, bf16); token-exact gradient accumulation, chunked loss, resumable checkpoints, `--smoke` mode |
-| `eval_harness.py` | HEx-PHI (GPT-4o-mini judge), SafetyBench, GPQA, AIME 24/25 (8 runs) via vLLM; logs think adoption and harm rate conditional on thinking; `--smoke` mode |
+| `train_lora.py` | LoRA SFT (r=16, α=16, lr 5e-5 cosine, 28 warmup, 3 epochs, 16k context, bf16); token-exact gradient accumulation, chunked loss, resumable checkpoints, adapter snapshots at every epoch boundary and at `--stop-after`, `--smoke` mode |
+| `eval_harness.py` | HEx-PHI (GPT-4o-mini judge), SafetyBench, GPQA, AIME 24/25 (8 runs, batched into one vLLM call) via vLLM; logs think adoption and harm rate conditional on thinking; `--smoke` mode |
 | `run_phase1.sh` | one resumable command for all of Phase 1 (key preflight, cross-machine resume via HF backup) |
+| `run_phase1b.sh` | Phase 1b: same-trajectory retrain to `STOP_STEP` (default 157 = epoch 1), eval of that snapshot, RIM verdict vs base and epoch 3 |
+| `diagnose_loops.py` | CPU-only loop diagnosis: loops in training data, loop onset vs training trace length, inside/outside `<think>` |
 | `run_recheck.sh` | reasoning re-check: GPQA/AIME (+ optional HEx-PHI) under R1-style decoding, loop metrics |
 | `sync_to_hf.py` | backs up / restores runs (metrics, adapters, checkpoints, responses) to a private Hugging Face repo |
 

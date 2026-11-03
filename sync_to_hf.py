@@ -20,7 +20,7 @@ import sys
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import RepositoryNotFoundError
 
-IGNORE_UP = ["_merged/**", "**/_merged/**", "**/*.tmp", "runs/train/smoke*/ckpt/**",
+IGNORE_UP = ["_merged/**", "**/_merged/**", "**/*.tmp", "**/*.tmp/**", "runs/train/smoke*/ckpt/**",
              "**/smoke*/ckpt/**"]
 # per-machine markers and the live log are never restored
 IGNORE_DOWN = ["runs/phase1/env.done", "runs/phase1/data.done", "runs/phase1/phase1.log",

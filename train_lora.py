@@ -264,6 +264,20 @@ def trainable_state(model):
     return {n: p.detach().cpu().clone() for n, p in model.named_parameters() if p.requires_grad}
 
 
+def save_snapshot(model, run_dir: Path, step: int):
+    """Inference-ready adapter at a given step: run_dir/adapter_step{N}/ (idempotent)."""
+    import shutil
+    final = run_dir / f"adapter_step{step}"
+    if (final / "adapter_model.safetensors").exists():
+        return
+    tmp = run_dir / f".adapter_step{step}.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    model.save_pretrained(tmp)
+    shutil.rmtree(final, ignore_errors=True)
+    tmp.rename(final)
+    print(f"snapshot saved: {final}")
+
+
 def save_ckpt(run_dir: Path, model, opt, sched, step: int):
     ck = run_dir / "ckpt"; ck.mkdir(parents=True, exist_ok=True)
     tmp = ck / "state.pt.tmp"
@@ -448,7 +462,13 @@ def main() -> int:
             print(" ".join(f"{k}={v}" for k, v in row.items()))
         if (step + 1) % cfg.save_every == 0 and step + 1 < total_steps:
             save_ckpt(run_dir, model, opt, sched, step + 1)
+        # Adapter snapshots at every epoch boundary (Phase 1b: checkpoint search along the
+        # same trajectory; cosine schedule still spans total_steps, so step 157 == epoch 1 of
+        # the 3-epoch run). Written atomically: tmp dir then rename.
+        if not cfg.smoke and (step + 1) % steps_per_epoch == 0 and step + 1 < total_steps:
+            save_snapshot(model, run_dir, step + 1)
         if args.stop_after and step + 1 >= args.stop_after and step + 1 < total_steps:
+            save_snapshot(model, run_dir, step + 1)
             save_ckpt(run_dir, model, opt, sched, step + 1); mf.close()
             print(f"stopped at step {step + 1}/{total_steps}; resume with --resume {run_dir}")
             return 0

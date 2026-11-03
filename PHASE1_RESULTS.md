@@ -51,10 +51,10 @@ Two decoding settings were used: **default** (model generation_config: temp 0.7,
 
 ## Next steps
 
-1. Diagnose looping (CPU only): `<|im_end|>` emission in training data/labels, repetitiveness of AM traces.
-2. One more AM-SFT run with effective batch 8; check whether think adoption moves toward 46% and looping disappears.
-3. Fix the eval inefficiency: batch all 8 AIME runs into one vLLM call (each run currently waits for its slowest looping answer).
-4. Then Phase 2: safety direction S + SDP (γ = 0.5, L19–L32).
+1. ✅ Loop diagnosis (`diagnose_loops.py`): training data has 0.0% tail loops (distinct-4gram 0.90); AM-SFT loops start at ~3.4–4.5k tokens, mostly within the training length range, and 97–100% inside `<think>`. Base model loops 0–3%. Conclusion: over-training degeneration, not data or length.
+2. ⏭ Phase 1b (`run_phase1b.sh`): retrain on the identical trajectory (same data, config, seed, 471-step cosine schedule), stop at epoch 1 (step 157), evaluate with Phase 1 settings. Training is bit-identical to the Phase 1 run up to that step (verified on a tiny model with stop/resume). Est. ~9 h train + eval on g6e.2xlarge.
+3. ✅ Eval inefficiency fixed: all 8 AIME runs go in one vLLM call (same per-item seeds, identical outputs).
+4. If epoch 1 shows the safety drop without looping: Phase 2 (safety direction S + SDP, γ = 0.5, L19–L32) starts from the same epoch-1 budget. Effective batch 8 stays a fallback.
 
 ## Artifacts
 

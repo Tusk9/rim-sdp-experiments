@@ -768,30 +768,55 @@ def main() -> int:
                         r.get("model_dir", model_dir) == model_dir:
                     prior[(r["bench"], r["id"], r["run"], r["seed"], r["prompt_sha"])] = r
         print(f"reuse: {len(prior)} saved generations available")
-    gf = open(gpath, "w")
+    # Append mode: a crash never loses earlier generations; the file is de-duplicated at the end.
+    if not a.reuse_generations and gpath.exists():
+        gpath.unlink()
+    gf = open(gpath, "a")
 
-    def run_gen(name, items, run=0):
+    def run_gen(name, items, runs=(0,)):
+        """Generate items x runs in ONE engine call (AIME: all 8 runs batched, so a run no longer
+        waits on its slowest looping answer). Seeds/keys are per (run, item) exactly as before,
+        so outputs and --reuse-generations are unchanged by batching. Returns gens[run_idx][i]."""
         t0 = time.time()
-        seeds = [cfg.seed + 100_003 * run + i for i in range(len(items))]
-        keys = [(name, it["id"], run, s, sha(it["user"])) for it, s in zip(items, seeds)]
-        gens = [None] * len(items)
-        for i, k in enumerate(keys):
+        jobs = []                                   # (run_idx, item_idx, seed, key)
+        for r_i, run in enumerate(runs):
+            for i, it in enumerate(items):
+                s = cfg.seed + 100_003 * run + i
+                jobs.append((r_i, i, s, (name, it["id"], run, s, sha(it["user"]))))
+        gens = [[None] * len(items) for _ in runs]
+        todo = []
+        for r_i, i, s, k in jobs:
             if k in prior:
                 p = prior[k]
-                gens[i] = {"text": p["text"], "n_tokens": p["n_tokens"], "finish": p["finish"]}
-        todo = [i for i, g in enumerate(gens) if g is None]
+                gens[r_i][i] = {"text": p["text"], "n_tokens": p["n_tokens"], "finish": p["finish"]}
+            else:
+                todo.append((r_i, i, s))
         if todo:
-            new = get_gen().generate([items[i]["user"] for i in todo], [seeds[i] for i in todo])
-            for i, g in zip(todo, new):
-                gens[i] = g
-        for it, g, s in zip(items, gens, seeds):
-            gf.write(json.dumps({"bench": name, "id": it["id"], "run": run, "seed": s,
+            new = get_gen().generate([items[i]["user"] for _, i, _ in todo], [s for _, _, s in todo])
+            for (r_i, i, _), g in zip(todo, new):
+                gens[r_i][i] = g
+        for r_i, i, s, _ in jobs:
+            it = items[i]
+            gf.write(json.dumps({"bench": name, "id": it["id"], "run": runs[r_i], "seed": s,
                                  "prompt_sha": sha(it["user"]), "max_new_tokens": max_new,
-                                 "model_dir": model_dir, **g}) + "\n")
+                                 "model_dir": model_dir, **gens[r_i][i]}) + "\n")
         gf.flush()
-        print(f"  [{name} run {run}] {len(items)} gens ({len(items) - len(todo)} reused) "
+        print(f"  [{name} runs {list(runs)}] {len(jobs)} gens ({len(jobs) - len(todo)} reused) "
               f"in {time.time() - t0:.0f}s")
         return gens
+
+    def dedupe_generations():
+        rows = {}
+        for line in gpath.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                if r.get("max_new_tokens", max_new) != max_new or \
+                        r.get("model_dir", model_dir) != model_dir:
+                    continue                # stale settings: same semantics as before
+                rows[(r["bench"], r["id"], r["run"], r["seed"], r["prompt_sha"])] = r
+        tmp = gpath.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in rows.values()))
+        tmp.replace(gpath)
 
     def cap(items):
         return items[:limit] if limit else items
@@ -812,7 +837,7 @@ def main() -> int:
                     k += 1
             if n_full not in (300, 330):
                 flags.append(f"HEx-PHI loaded {n_full} prompts (expected 300 public / 330)")
-            gens = run_gen(b, items)
+            gens = run_gen(b, items)[0]
             m, rows = score_hexphi(items, gens, judge, cfg)
             m["n_total_available"] = n_full
             with open(out / "judge.jsonl", "w") as f:
@@ -822,7 +847,7 @@ def main() -> int:
             n_full = len(items)
             if limit:
                 items = sorted(items, key=lambda x: sha(x["id"] + str(cfg.seed)))[:limit]
-            gens = run_gen(b, items)
+            gens = run_gen(b, items)[0]
             m, rows = score_mc(items, gens)
             m["n_total_available"] = n_full
             if not has_gold:
@@ -834,11 +859,11 @@ def main() -> int:
                            if r["pred"] else None) for r in rows}, f)
         elif b == "gpqa":
             items = cap(load_gpqa(cfg))
-            gens = run_gen(b, items)
+            gens = run_gen(b, items)[0]
             m, rows = score_mc(items, gens)
         elif b in ("aime24", "aime25"):
             items = cap(load_aime(cfg.aime_dirs[b], b))
-            gens_by_run = [run_gen(b, items, run=k) for k in range(aime_runs)]
+            gens_by_run = run_gen(b, items, runs=tuple(range(aime_runs)))
             m, rows = score_aime(items, gens_by_run)
         else:
             print(f"unknown benchmark {b}"); continue
@@ -848,6 +873,7 @@ def main() -> int:
         with open(out / f"{b}_items.jsonl", "w") as f:
             for r in rows: f.write(json.dumps(r) + "\n")
     gf.close()
+    dedupe_generations()
 
     if judge:
         results["judge_models_returned"] = sorted(x for x in judge.models_seen if x)
