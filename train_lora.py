@@ -85,8 +85,16 @@ class Config:
     per_device_batch: int = 1
     effective_batch: int = 64
 
-    # --- SDP (this script: baseline only) ---
-    gamma: float = 0.0          # §2 baseline "AM-SFT": identical with gamma = 0
+    # --- SDP (context file §2, §3.2) ---
+    gamma: float = 0.0          # 0 = AM-SFT baseline; paper's final 3B SDP: 0.5
+    sdp_layers: tuple = tuple(range(19, 33))   # M = L19..L32 (14 layers), final 3B setting
+    sdp_direction: str = "runs/direction/S_advbench.pt"   # from extract_direction.py
+    # [UNSPECIFIED] §3.3 layer indexing. MY CHOICE: layer l <-> HF hidden_states[l]
+    #   (0 = embeddings, l = output of decoder block l, 1-based). Same as extract_direction.py.
+    # [UNSPECIFIED] §3.2 token position. MY CHOICE: last non-pad token (paper's sketch and
+    #   diagnostics). Penalty computed in fp32 (§4 pitfall 5).
+    # Accumulation (MY CHOICE, follows HF Trainer semantics of `loss = ce + gamma*pen/|M|`):
+    #   CE is token-exact over the effective batch; the penalty is averaged over sequences.
 
     # --- engineering (MY CHOICES, don't affect the math) ---
     gradient_checkpointing: bool = True
@@ -194,6 +202,29 @@ def token_ce_sum(causal_lm, ids, labels, attn, chunk: int, output_hidden_states=
         total = total + checkpoint(_ce_chunk, head, hs[i:i + chunk], ys[i:i + chunk],
                                    use_reentrant=False)
     return total, int(sel.sum()), out
+
+
+def sdp_penalty_setup(model, causal_lm, ids, attn, layers):
+    """
+    SDP (context file §3.2). Runs the FROZEN base (adapter disabled, no grad) first and keeps
+    only its last-non-pad-token states at the penalised layers, then returns a closure that,
+    given the adapted forward's hidden_states and unit directions S[|M|, d], computes
+        mean_rows  sum_{l in M}  ((h_l - h_base_l) . S_l)^2      in fp32.
+    Right padding is assumed (collate pads right), so last token = attn.sum(1) - 1.
+    """
+    idx = attn.sum(1) - 1
+    rows = torch.arange(idx.size(0), device=ids.device)
+    with torch.no_grad(), model.disable_adapter():
+        hs = causal_lm.model(input_ids=ids, attention_mask=attn, use_cache=False,
+                             output_hidden_states=True).hidden_states
+        base = torch.stack([hs[l][rows, idx].float() for l in layers], 1)   # [B, |M|, d]
+        del hs
+
+    def penalty(hidden_states, S):
+        cur = torch.stack([hidden_states[l][rows, idx].float() for l in layers], 1)
+        d = ((cur - base) * S.unsqueeze(0)).sum(-1)                         # [B, |M|]
+        return (d ** 2).sum(1).mean()
+    return penalty
 
 
 # ------------------------------- model ---------------------------------------
@@ -310,6 +341,10 @@ def main() -> int:
     ap.add_argument("--save-every", type=int, help="optimizer steps between checkpoints")
     ap.add_argument("--stop-after", type=int,
                     help="exit cleanly after this global step (resume later with --resume)")
+    ap.add_argument("--lr", type=float, help="override 5e-5 (TESTS ONLY; BREAKS COMPARABILITY)")
+    ap.add_argument("--gamma", type=float, help="SDP weight (0 = AM-SFT baseline; paper 0.5)")
+    ap.add_argument("--sdp-layers", help="e.g. 19-32 (default) or 20-26")
+    ap.add_argument("--sdp-direction", help="S file from extract_direction.py")
     args = ap.parse_args()
 
     cfg = Config()
@@ -320,7 +355,13 @@ def main() -> int:
     if args.data_dir: cfg.data_dir = args.data_dir
     if args.model_dir: cfg.model_dir = args.model_dir
     if args.save_every: cfg.save_every = args.save_every
-    assert cfg.gamma == 0.0, "train_lora.py is the gamma=0 baseline; SDP is a separate script"
+    if args.gamma is not None: cfg.gamma = args.gamma
+    if args.lr is not None: cfg.lr = args.lr
+    if args.sdp_layers:
+        lo, hi = (int(x) for x in args.sdp_layers.split("-"))
+        cfg.sdp_layers = tuple(range(lo, hi + 1))
+    if args.sdp_direction: cfg.sdp_direction = args.sdp_direction
+    assert cfg.gamma >= 0
     assert cfg.effective_batch % cfg.per_device_batch == 0
 
     # --- comparability flags (project rule: always surface these) ---
@@ -328,6 +369,10 @@ def main() -> int:
     if cfg.max_seq_len != 16_384: flags.append(f"max_seq_len={cfg.max_seq_len} (paper 16,384)")
     if cfg.effective_batch not in (8, 64): flags.append(f"effective_batch={cfg.effective_batch}")
     if cfg.smoke: flags.append("SMOKE TEST: 50 steps, accum 1 — not a baseline run")
+    if cfg.lr != 5e-5: flags.append(f"lr={cfg.lr} (paper 5e-5)")
+    if cfg.gamma > 0 and cfg.gamma != 0.5: flags.append(f"gamma={cfg.gamma} (paper final 0.5)")
+    if cfg.gamma > 0 and cfg.sdp_layers != tuple(range(19, 33)):
+        flags.append(f"sdp_layers={cfg.sdp_layers[0]}-{cfg.sdp_layers[-1]} (paper final 19-32)")
 
     set_seed(cfg.seed)
     dev = pick_device()
@@ -362,8 +407,10 @@ def main() -> int:
     if args.resume:
         run_dir = Path(args.resume)
     else:
+        kind = "smoke" if cfg.smoke else ("sdp" if cfg.gamma > 0 else "amsft")
+        g = f"g{cfg.gamma:g}" + (f"_M{cfg.sdp_layers[0]}-{cfg.sdp_layers[-1]}" if cfg.gamma > 0 else "")
         name = args.run_name or cfg.run_name or \
-            f"{'smoke' if cfg.smoke else 'amsft'}_g0_L{cfg.max_seq_len}_eb{cfg.effective_batch}_" \
+            f"{kind}_{g}_L{cfg.max_seq_len}_eb{cfg.effective_batch}_" \
             f"s{cfg.seed}_{time.strftime('%Y%m%d-%H%M%S')}"
         run_dir = Path(cfg.out_root) / name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -378,6 +425,21 @@ def main() -> int:
     assert len(lora_modules) == n_layers * len(cfg.lora_targets), \
         f"expected {n_layers * len(cfg.lora_targets)} LoRA modules, got {len(lora_modules)}"
     fp0 = base_fingerprint(model)
+
+    # --- SDP: safety direction (frozen, from the base model) ---
+    S_dir, sdp_meta = None, None
+    if cfg.gamma > 0:
+        blob = torch.load(cfg.sdp_direction, map_location="cpu")
+        S_all, sdp_meta = blob["S"].float(), blob["meta"]
+        assert S_all.shape == (n_layers + 1, causal.config.hidden_size), \
+            f"S shape {tuple(S_all.shape)} != ({n_layers + 1}, {causal.config.hidden_size})"
+        assert all(1 <= l < n_layers for l in cfg.sdp_layers), \
+            f"sdp_layers must be in 1..{n_layers - 1} (hidden_states[{n_layers}] is post-norm)"
+        if sdp_meta.get("model_fingerprint") not in (None, fp0):
+            raise SystemExit("S was extracted from a different base model (fingerprint mismatch)")
+        S_dir = S_all[list(cfg.sdp_layers)].to(dev)                 # [|M|, d], unit rows
+        assert torch.allclose(S_dir.norm(dim=-1), torch.ones(len(cfg.sdp_layers), device=dev),
+                              atol=1e-4), "S rows must be unit vectors"
 
     opt = torch.optim.AdamW(trainable, lr=cfg.lr, betas=cfg.adam_betas, eps=cfg.adam_eps,
                             weight_decay=cfg.weight_decay)
@@ -402,6 +464,11 @@ def main() -> int:
             (Path(cfg.data_dir) / "prep_stats.json").read_bytes()).hexdigest()[:16]
             if (Path(cfg.data_dir) / "prep_stats.json").exists() else None,
         "base_fingerprint": fp0,
+        "sdp": None if cfg.gamma == 0 else {
+            "gamma": cfg.gamma, "layers": list(cfg.sdp_layers), "direction": cfg.sdp_direction,
+            "direction_sha256": hashlib.sha256(Path(cfg.sdp_direction).read_bytes()).hexdigest(),
+            "direction_meta": {k: sdp_meta.get(k) for k in ("n_prompts", "advbench_sha256",
+                               "model_fingerprint", "layer_convention", "position", "flags")}},
     }
     if not args.resume:
         (run_dir / "config.json").write_text(json.dumps(meta, indent=2, default=str))
@@ -424,23 +491,41 @@ def main() -> int:
 
     # --- train ---
     mpath = run_dir / "metrics.csv"
-    fields = ["step", "epoch", "loss", "lr", "grad_norm", "sup_tokens", "seq_tokens",
-              "max_seq", "step_s", "tok_per_s", "mem_alloc_gb", "mem_driver_gb", "mem_peak_gb"]
+    fields = ["step", "epoch", "loss", "sdp_pen", "total_loss", "lr", "grad_norm", "sup_tokens",
+              "seq_tokens", "max_seq", "step_s", "tok_per_s", "mem_alloc_gb", "mem_driver_gb",
+              "mem_peak_gb"]
     new_file = not mpath.exists()
-    mf = open(mpath, "a", newline=""); mw = csv.DictWriter(mf, fieldnames=fields)
+    if not new_file:                    # resume: keep the file's own header
+        with open(mpath) as f0:
+            fields = next(csv.reader(f0), fields) or fields
+    mf = open(mpath, "a", newline="")
+    mw = csv.DictWriter(mf, fieldnames=fields, extrasaction="ignore")
     if new_file: mw.writeheader()
 
     if dev.type == "cuda": torch.cuda.reset_peak_memory_stats()
-    t_run = time.time(); tok_seen = 0; losses = []
+    t_run = time.time(); tok_seen = 0; losses = []; pens = []; smoke_pen0 = None
     for step in range(start_step, total_steps):
         micro = steps[step]
         n_sup = int(sum(sup_per_ex[mb].sum() for mb in micro))
         sync(dev); t0 = time.time()
-        loss_sum = 0.0; seq_tok = 0; max_seq = 0
+        loss_sum = 0.0; pen_sum = 0.0; seq_tok = 0; max_seq = 0
         for mb in micro:
             ids, lab, att = collate(ds, mb, pad_id, cfg.max_seq_len, dev)
-            ce, _, _ = token_ce_sum(causal, ids, lab, att, cfg.ce_chunk_tokens)
-            (ce / n_sup).backward()                    # token-exact accumulation
+            if cfg.gamma > 0:
+                pen = sdp_penalty_setup(model, causal, ids, att, cfg.sdp_layers)
+                ce, _, out = token_ce_sum(causal, ids, lab, att, cfg.ce_chunk_tokens,
+                                          output_hidden_states=True)
+                pen = pen(out.hidden_states, S_dir)            # mean_rows sum_l d^2, fp32
+                pen_m = pen / len(cfg.sdp_layers)
+                # CE token-exact over the step; penalty = mean over the step's sequences
+                (ce / n_sup + cfg.gamma * pen_m / len(micro)).backward()
+                pen_sum += pen_m.item() / len(micro)
+                if smoke_pen0 is None and start_step == 0 and step == 0:
+                    smoke_pen0 = pen_m.item()
+                del out, pen
+            else:
+                ce, _, _ = token_ce_sum(causal, ids, lab, att, cfg.ce_chunk_tokens)
+                (ce / n_sup).backward()                    # token-exact accumulation
             loss_sum += ce.item(); seq_tok += int(att.sum()); max_seq = max(max_seq, ids.size(1))
             del ce, ids, lab, att
         gnorm = torch.nn.utils.clip_grad_norm_(trainable, cfg.max_grad_norm).item()
@@ -452,9 +537,10 @@ def main() -> int:
         if not math.isfinite(loss) or not math.isfinite(gnorm):
             save_ckpt(run_dir, model, opt, sched, step)
             print(f"ERROR: non-finite loss/grad at step {step + 1}; ckpt saved"); return 1
-        losses.append(loss); tok_seen += seq_tok
+        losses.append(loss); pens.append(pen_sum); tok_seen += seq_tok
         row = {"step": step + 1, "epoch": round((step + 1) / steps_per_epoch, 4),
-               "loss": round(loss, 5), "lr": lr_now, "grad_norm": round(gnorm, 4),
+               "loss": round(loss, 5), "sdp_pen": float(f"{pen_sum:.6g}"),
+               "total_loss": round(loss + cfg.gamma * pen_sum, 5), "lr": lr_now, "grad_norm": round(gnorm, 4),
                "sup_tokens": n_sup, "seq_tokens": seq_tok, "max_seq": max_seq,
                "step_s": round(dt, 2), "tok_per_s": round(seq_tok / dt, 1), **mem_gb(dev)}
         mw.writerow(row); mf.flush()
@@ -491,6 +577,9 @@ def main() -> int:
         "base_weights_unchanged": fp0 == fp1, **mem_gb(dev),
         "eta_full_run_hours": round(full_tokens / tps / 3600, 1) if tps == tps else None,
         "comparability_flags": flags,
+        "sdp_gamma": cfg.gamma,
+        "sdp_pen_first10_mean": float(np.mean(pens[:10])) if pens and cfg.gamma > 0 else None,
+        "sdp_pen_last10_mean": float(np.mean(pens[-10:])) if pens and cfg.gamma > 0 else None,
     }
 
     if cfg.smoke:
@@ -513,6 +602,8 @@ def main() -> int:
                           if "lora_B" in n)
         smoke_checks["lora_B_norm_after"] = lora_b_norm
         smoke_checks["base_weights_unchanged"] = fp0 == fp1
+        if cfg.gamma > 0:
+            smoke_checks["sdp_pen_first_microbatch"] = smoke_pen0   # LoRA B=0 -> must be 0
         smoke_checks["loss_decreased"] = summary["loss_last10_mean"] < summary["loss_first10_mean"]
         tol = 1e-2 if dtype == torch.bfloat16 else 1e-4
         verdict = {
@@ -522,6 +613,9 @@ def main() -> int:
             "base_frozen": fp0 == fp1,
             "no_nan": all(math.isfinite(x) for x in losses),
         }
+        if cfg.gamma > 0:
+            verdict["sdp_pen_zero_at_init"] = smoke_pen0 is not None and abs(smoke_pen0) < 1e-6
+            verdict["sdp_pen_finite"] = all(math.isfinite(x) for x in pens)
         summary["smoke_checks"] = smoke_checks
         summary["smoke_verdict"] = verdict
         summary["smoke_pass"] = all(verdict.values())

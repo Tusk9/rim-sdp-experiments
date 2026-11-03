@@ -49,12 +49,32 @@ Two decoding settings were used: **default** (model generation_config: temp 0.7,
 - Judge calibration: paraphrased rubric vs Qi et al.'s exact prompt; base harm 2–3% vs paper 10%.
 - SafetyBench test split has no answer key; accuracy needs the official scorer.
 
+## Phase 1b: epoch-1 checkpoint (step 157 of the same trajectory)
+
+Same data, config, seed and 471-step schedule; stopped at step 157; same eval settings (default decoding, 16k).
+
+| Metric | Base | AM-SFT step 157 | AM-SFT epoch 3 |
+|---|---:|---:|---:|
+| HEx-PHI harmful % | 2.67 [1.4, 5.2] | **34.0** [28.9, 39.5] | 47.33 [41.8, 53.0] |
+| think adoption % | 0 | 80.7 | 96.7 |
+| harmful \| think % | – | 40.9 | 49.0 |
+| harmful \| no think % | 2.67 | 5.17 | 0.0 |
+| GPQA acc % | 29.46 [25.4, 33.9] | 16.74 [13.6, 20.5] | 11.61 |
+| GPQA acc among finished % | – | 26.32 | – |
+| GPQA truncated % / ends in loop % | 0.0 / – | 36.4 / 35.3 | 42.0 / – |
+| AIME24 mean ± sd (truncated %) | 5.0 ± 3.1 (4.2) | 3.75 ± 2.1 (60.8) | 4.58 ± 3.5 (76.3) |
+| AIME25 mean ± sd (truncated %) | 2.92 ± 2.1 (1.3) | 2.5 ± 3.5 (61.3) | 1.67 ± 3.1 (70.8) |
+
+- **Safety drop reproduces at epoch 1** (CIs do not overlap with base); harm\|think 41% matches the paper's ~42%.
+- **Looping is already present at epoch 1**, so it is not only over-training. Accuracy on finished GPQA answers (26.3%) is close to base (29.5%): the headline GPQA drop is mostly looping.
+- Formal RIM criterion (GPQA CIs overlap): not met, because of looping. AIME within noise but >60% truncated.
+
 ## Next steps
 
-1. ✅ Loop diagnosis (`diagnose_loops.py`): training data has 0.0% tail loops (distinct-4gram 0.90); AM-SFT loops start at ~3.4–4.5k tokens, mostly within the training length range, and 97–100% inside `<think>`. Base model loops 0–3%. Conclusion: over-training degeneration, not data or length.
-2. ⏭ Phase 1b (`run_phase1b.sh`): retrain on the identical trajectory (same data, config, seed, 471-step cosine schedule), stop at epoch 1 (step 157), evaluate with Phase 1 settings. Training is bit-identical to the Phase 1 run up to that step (verified on a tiny model with stop/resume). Est. ~9 h train + eval on g6e.2xlarge.
-3. ✅ Eval inefficiency fixed: all 8 AIME runs go in one vLLM call (same per-item seeds, identical outputs).
-4. If epoch 1 shows the safety drop without looping: Phase 2 (safety direction S + SDP, γ = 0.5, L19–L32) starts from the same epoch-1 budget. Effective batch 8 stays a fallback.
+1. ✅ Loop diagnosis: training data has ~0% loops; loops start mostly inside `<think>`, at lengths seen in training.
+2. ✅ Phase 1b (above).
+3. ⏭ **Phase 2 (`run_phase2.sh`): SDP (γ = 0.5, L19–L32) at the same step-157 budget, compared with `amsft_step157`.** Success = HEx-PHI harm clearly below 34% with GPQA/AIME not worse than `amsft_step157`; truncation and accuracy-among-finished reported for both. Code verified on a tiny model: γ=0 bit-identical to before, penalty and gradient match the paper's §3.2 sketch (rel. diff 1e-7), penalty is 0 at init, stop/resume deterministic, SDP reduces displacement along S.
+4. Fallbacks for looping: effective batch 8, or a 7B model. Phase 3 (reasoning-format study) after Phase 2.
 
 ## Artifacts
 
