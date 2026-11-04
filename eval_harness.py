@@ -70,6 +70,10 @@ class Config:
     # --- prompting ---
     # Chat format = tokenizer template with its default system prompt (same as prep_am_data.py).
     system_prompt: str | None = None
+    # Phase 2 follow-up (NOT a paper setting): text appended after the generation prompt,
+    # e.g. "<think>\n" to force thinking mode. Kept at the start of the saved response so
+    # think detection and the judge see the full answer. Empty = paper setting.
+    prefill: str = ""
 
     # --- decoding [UNSPECIFIED] ---
     # MY CHOICE: the model's own generation_config.json (Qwen2.5-Instruct ships
@@ -335,7 +339,8 @@ class Generator:
         msgs = [{"role": "user", "content": user}]
         if self.cfg.system_prompt is not None:
             msgs = [{"role": "system", "content": self.cfg.system_prompt}] + msgs
-        return self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        return self.tok.apply_chat_template(msgs, tokenize=False,
+                                            add_generation_prompt=True) + self.cfg.prefill
 
     def generate(self, users: list[str], seeds: list[int]) -> list[dict]:
         prompts = [self.render(u) for u in users]
@@ -344,7 +349,8 @@ class Generator:
             sps = [SamplingParams(max_tokens=self.max_new, seed=s, **self.decode)
                    for s in seeds]
             outs = self.llm.generate(prompts, sps, use_tqdm=True)
-            return [{"text": o.outputs[0].text, "n_tokens": len(o.outputs[0].token_ids),
+            return [{"text": self.cfg.prefill + o.outputs[0].text,
+                     "n_tokens": len(o.outputs[0].token_ids),
                      "finish": o.outputs[0].finish_reason} for o in outs]
         res = []
         bs = self.cfg.hf_batch_size
@@ -371,7 +377,7 @@ class Generator:
             for row in gen_rows:
                 cut = next((k for k, t in enumerate(row) if t in eos), None)
                 toks = row if cut is None else row[:cut]
-                res.append({"text": self.tok.decode(toks, skip_special_tokens=True),
+                res.append({"text": self.cfg.prefill + self.tok.decode(toks, skip_special_tokens=True),
                             "n_tokens": len(toks),
                             "finish": "length" if cut is None else "stop"})
         return res
@@ -673,6 +679,8 @@ def main() -> int:
     ap.add_argument("--judge-backend", choices=["openai", "mock"])
     ap.add_argument("--judge-model"); ap.add_argument("--judge-prompt-file")
     ap.add_argument("--decoding", choices=["model_default", "greedy", "r1"])
+    ap.add_argument("--prefill-think", action="store_true",
+                    help="start every answer with '<think>\\n' (forced thinking; not a paper setting)")
     ap.add_argument("--max-model-len", type=int, help="vLLM context budget (Qwen2.5-3B max 32768)")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--limit", type=int)
@@ -699,6 +707,7 @@ def main() -> int:
     if a.aime24_dir: cfg.aime_dirs["aime24"] = a.aime24_dir
     if a.aime25_dir: cfg.aime_dirs["aime25"] = a.aime25_dir
     cfg.smoke = a.smoke
+    if a.prefill_think: cfg.prefill = "<think>\n"
     random.seed(cfg.seed); np.random.seed(cfg.seed)
 
     limit = cfg.smoke_n if cfg.smoke else cfg.limit
@@ -735,6 +744,8 @@ def main() -> int:
         decode["top_k"] = 0
     if cfg.max_new_tokens >= cfg.max_model_len:
         raise SystemExit(f"max_new_tokens {cfg.max_new_tokens} must be < max_model_len {cfg.max_model_len}")
+    if cfg.prefill:
+        flags.append(f"prefill={cfg.prefill!r}: forced-thinking eval (not a paper setting)")
     if cfg.decoding != "model_default":
         flags.append(f"decoding={cfg.decoding} {decode}")
 
@@ -782,7 +793,7 @@ def main() -> int:
         for r_i, run in enumerate(runs):
             for i, it in enumerate(items):
                 s = cfg.seed + 100_003 * run + i
-                jobs.append((r_i, i, s, (name, it["id"], run, s, sha(it["user"]))))
+                jobs.append((r_i, i, s, (name, it["id"], run, s, sha(it["user"] + cfg.prefill))))
         gens = [[None] * len(items) for _ in runs]
         todo = []
         for r_i, i, s, k in jobs:
@@ -798,7 +809,7 @@ def main() -> int:
         for r_i, i, s, _ in jobs:
             it = items[i]
             gf.write(json.dumps({"bench": name, "id": it["id"], "run": runs[r_i], "seed": s,
-                                 "prompt_sha": sha(it["user"]), "max_new_tokens": max_new,
+                                 "prompt_sha": sha(it["user"] + cfg.prefill), "max_new_tokens": max_new,
                                  "model_dir": model_dir, **gens[r_i][i]}) + "\n")
         gf.flush()
         print(f"  [{name} runs {list(runs)}] {len(jobs)} gens ({len(jobs) - len(todo)} reused) "

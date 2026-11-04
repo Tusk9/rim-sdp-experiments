@@ -11,7 +11,7 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 | 0 | Environment, data prep, training and eval smoke tests | ✅ done |
 | 1 | Base eval → AM-SFT LoRA (γ = 0) → eval: does RIM reproduce? | ✅ done: see [PHASE1_RESULTS.md](PHASE1_RESULTS.md) |
 | 1b | Epoch-1 snapshot (step 157) of the same trajectory: safety drop holds (HEx-PHI 34%), looping persists (GPQA 36% truncated) | ✅ done |
-| 2 | Safety direction S (AdvBench) + SDP training (γ = 0.5, L19–L32) at the step-157 budget, vs `amsft_step157` | ⏭ next (`run_phase2.sh`) |
+| 2 | SDP (γ = 0.5, L19–L32) at step 157: harm back to base (2.7% vs 34%), no looping, but 0% thinking on HEx-PHI. See [PHASE2_RESULTS.md](PHASE2_RESULTS.md) | ✅ done; forced-thinking check next (`run_forcethink.sh`) |
 | 3 | Reasoning-format study (full CoT / Chain of Draft / no tags / answer only) | planned |
 
 **Phase 1 headline:** HEx-PHI harmful rises from ~2% to ~50% after benign reasoning SFT (harm almost
@@ -33,6 +33,7 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `diagnose_loops.py` | CPU-only loop diagnosis: loops in training data, loop onset vs training trace length, inside/outside `<think>` |
 | `extract_direction.py` | safety direction S from 520 AdvBench refusal/compliance pairs on the base model (§3.1), with held-out separation diagnostics |
 | `run_phase2.sh` | Phase 2: direction → GPU SDP smoke test → SDP training to step 157 → eval → displacement → SDP verdict vs `amsft_step157` |
+| `run_forcethink.sh` | HEx-PHI with forced `<think>` prefill for SDP, AM-SFT and base: harm while reasoning |
 | `displacement.py` | mechanism check: displacement of HEx-PHI hidden states along S, fine-tuned vs base (§3.4) |
 | `run_recheck.sh` | reasoning re-check: GPQA/AIME (+ optional HEx-PHI) under R1-style decoding, loop metrics |
 | `sync_to_hf.py` | backs up / restores runs (metrics, adapters, checkpoints, responses) to a private Hugging Face repo |
