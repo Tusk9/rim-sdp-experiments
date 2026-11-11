@@ -12,6 +12,7 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 | 1 | Base eval → AM-SFT LoRA (γ = 0) → eval: does RIM reproduce? | ✅ done: see [PHASE1_RESULTS.md](PHASE1_RESULTS.md) |
 | 1b | Epoch-1 snapshot (step 157) of the same trajectory: safety drop holds (HEx-PHI 34%), looping persists (GPQA 36% truncated) | ✅ done |
 | 2 | SDP (γ = 0.5, L19–L32) at step 157: harm back to base (2.7% vs 34%), no looping, but 0% thinking on HEx-PHI. See [PHASE2_RESULTS.md](PHASE2_RESULTS.md) | ✅ done; forced-thinking check next (`run_forcethink.sh`) |
+| Step 1 | Is SDP's 0% think adoption a harm gate, a format gate, or untagged reasoning? Forced thinking, benign think adoption, XSTest, AIME-cue HEx-PHI, matched-position displacement. See [STEP1.md](STEP1.md) | code ready (`run_step1.sh`) |
 | 3 | Reasoning-format study (full CoT / Chain of Draft / no tags / answer only) | planned |
 
 **Phase 1 headline:** HEx-PHI harmful rises from ~2% to ~50% after benign reasoning SFT (harm almost
@@ -27,14 +28,17 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `download_assets.py` | model + datasets pinned to exact commit SHAs; reports gated repos |
 | `prep_am_data.py` | first 10k AM-DeepSeek examples → Qwen chat template, prompt masking verified per example, length stats |
 | `train_lora.py` | LoRA SFT (r=16, α=16, lr 5e-5 cosine, 28 warmup, 3 epochs, 16k context, bf16); token-exact gradient accumulation, chunked loss, resumable checkpoints, adapter snapshots at every epoch boundary and at `--stop-after`, SDP penalty (`--gamma`, `--sdp-layers`), `--smoke` mode |
-| `eval_harness.py` | HEx-PHI (GPT-4o-mini judge), SafetyBench, GPQA, AIME 24/25 (8 runs, batched into one vLLM call) via vLLM; logs think adoption and harm rate conditional on thinking; `--smoke` mode |
+| `eval_harness.py` | HEx-PHI (GPT-4o-mini judge), SafetyBench, GPQA, AIME 24/25 (8 runs, batched into one vLLM call) via vLLM; logs think adoption and harm rate conditional on thinking; `--smoke` mode; Step 1: `benign` and `xstest` benchmarks, `--hexphi-suffix` |
 | `run_phase1.sh` | one resumable command for all of Phase 1 (key preflight, cross-machine resume via HF backup) |
 | `run_phase1b.sh` | Phase 1b: same-trajectory retrain to `STOP_STEP` (default 157 = epoch 1), eval of that snapshot, RIM verdict vs base and epoch 3 |
 | `diagnose_loops.py` | CPU-only loop diagnosis: loops in training data, loop onset vs training trace length, inside/outside `<think>` |
-| `extract_direction.py` | safety direction S from 520 AdvBench refusal/compliance pairs on the base model (§3.1), with held-out separation diagnostics |
+| `extract_direction.py` | safety direction S from 520 AdvBench refusal/compliance pairs on the base model (§3.1), with held-out separation diagnostics; `--mode prompt_contrast` = prompt-level refusal direction (Step 1) |
 | `run_phase2.sh` | Phase 2: direction → GPU SDP smoke test → SDP training to step 157 → eval → displacement → SDP verdict vs `amsft_step157` |
 | `run_forcethink.sh` | HEx-PHI with forced `<think>` prefill for SDP, AM-SFT and base: harm while reasoning |
-| `displacement.py` | mechanism check: displacement of HEx-PHI hidden states along S, fine-tuned vs base (§3.4) |
+| `displacement.py` | mechanism check: displacement of HEx-PHI hidden states along S, fine-tuned vs base (§3.4); `--position refusal_end` for a position-matched sign check, per-prompt output |
+| `run_step1.sh` | Step 1: one resumable command for all diagnostics below, then `step1_report.py` |
+| `inspect_generations.py` | CPU: untagged reasoning in saved generations + a private sample csv for manual reading |
+| `step1_report.py` | Step 1 summary table and reading guide (metrics only) |
 | `run_recheck.sh` | reasoning re-check: GPQA/AIME (+ optional HEx-PHI) under R1-style decoding, loop metrics |
 | `sync_to_hf.py` | backs up / restores runs (metrics, adapters, checkpoints, responses) to a private Hugging Face repo |
 

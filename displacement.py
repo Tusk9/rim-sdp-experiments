@@ -13,6 +13,17 @@ Usage:  python displacement.py --adapter amsft_step157=runs/train/.../adapter_st
                                --adapter sdp_step157=runs/train/.../adapter_step157
 Output: runs/diagnose/displacement.csv (tag, layer, mean_d, mean_abs_d, rms_d, n)
         runs/diagnose/displacement.json (summary over L19-L32 per tag)
+        runs/diagnose/displacement_per_prompt.csv (tag, id, category, mean d over M) — for the
+        per-prompt displacement-vs-harm Spearman analysis
+
+Step 1 sign check (Phase 2 finding 4): the paper's S is measured at the END of a full
+conversation, but the default here measures at the generation-prompt token. Two matched options:
+  --position refusal_end   prompt + the fixed refusal template, last non-pad token: the SAME
+                           position type as S_advbench (use with the default --s-file)
+  --position gen_prompt    (default) use with --s-file runs/direction/S_prompt_contrast.pt
+                           (extract_direction.py --mode prompt_contrast), which is measured at
+                           this position
+Non-default runs write files with a _<position>[_<s-file stem>] suffix, so nothing is overwritten.
 """
 from __future__ import annotations
 
@@ -36,13 +47,27 @@ OUT_DIR = "runs/diagnose"
 # =============================================================================
 
 
-def load_hexphi_prompts(d: str) -> list[str]:
+# §3.1 refusal template — must stay identical to extract_direction.Config.refusal
+REFUSAL = ("I apologize, but I'm not able to help with this request. This involves "
+           "potentially harmful, dangerous, or illegal activities, and I must decline "
+           "to provide any assistance.")
+
+
+def load_hexphi(d: str) -> list[dict]:
+    """Same order and ids as eval_harness.load_hexphi (hexphi-c<cat>-<row>)."""
     files = sorted(Path(d).rglob("category_*.csv"), key=lambda p: int(re.findall(r"\d+", p.stem)[-1]))
     out = []
     for p in files:
+        cat = int(re.findall(r"\d+", p.stem)[-1])
         with open(p, newline="", encoding="utf-8") as f:
-            out += [r[0].strip() for r in csv.reader(f) if r and r[0].strip()]
+            for j, r in enumerate(csv.reader(f)):
+                if r and r[0].strip():
+                    out.append({"id": f"hexphi-c{cat}-{j}", "category": cat, "prompt": r[0].strip()})
     return out
+
+
+def load_hexphi_prompts(d: str) -> list[str]:
+    return [x["prompt"] for x in load_hexphi(d)]
 
 
 @torch.no_grad()
@@ -71,6 +96,9 @@ def main() -> int:
     ap.add_argument("--hexphi-dir", default=HEXPHI_DIR); ap.add_argument("--out-dir", default=OUT_DIR)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--summary-layers", default=f"{SUMMARY_LAYERS[0]}-{SUMMARY_LAYERS[-1]}")
+    ap.add_argument("--position", choices=["gen_prompt", "refusal_end"], default="gen_prompt",
+                    help="gen_prompt = state before answering (default); refusal_end = end of "
+                         "prompt + refusal template (same position type as S_advbench)")
     a = ap.parse_args()
     lo, hi = (int(x) for x in a.summary_layers.split("-")); M = list(range(lo, hi + 1))
 
@@ -82,10 +110,23 @@ def main() -> int:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     S = torch.load(a.s_file, map_location="cpu")["S"].float()          # [L+1, d]
-    prompts = load_hexphi_prompts(a.hexphi_dir)[:a.limit] if a.limit else load_hexphi_prompts(a.hexphi_dir)
-    texts = [tok.apply_chat_template([{"role": "user", "content": p}], tokenize=False,
-                                     add_generation_prompt=True) for p in prompts]
-    rows, summary, H0 = [], {}, None
+    hx = load_hexphi(a.hexphi_dir)
+    hx = hx[:a.limit] if a.limit else hx
+    prompts = [x["prompt"] for x in hx]
+    if a.position == "gen_prompt":
+        texts = [tok.apply_chat_template([{"role": "user", "content": p}], tokenize=False,
+                                         add_generation_prompt=True) for p in prompts]
+    else:   # full conversation ending in the refusal template, like extract_direction's S
+        texts = [tok.apply_chat_template([{"role": "user", "content": p},
+                                          {"role": "assistant", "content": REFUSAL}],
+                                         tokenize=False) for p in prompts]
+    s_meta = torch.load(a.s_file, map_location="cpu").get("meta", {})
+    s_pos = s_meta.get("mode", "refusal_compliance")
+    matched = (a.position == "refusal_end") == (s_pos == "refusal_compliance")
+    if not matched:
+        print(f"WARNING: S from mode={s_pos} measured at a different position than "
+              f"--position {a.position}; sign is not interpretable (Phase 2 finding 4)")
+    rows, per_prompt, summary, H0 = [], [], {}, None
     for spec in a.adapter:
         tag, path = spec.split("=", 1)
         t0 = time.time()
@@ -100,6 +141,10 @@ def main() -> int:
                          "mean_abs_d": round(float(d[:, l].abs().mean()), 5),
                          "rms_d": round(float(d[:, l].pow(2).mean().sqrt()), 5), "n": d.size(0)})
         Mv = [l for l in M if l < d.size(1)]
+        dm = d[:, Mv].mean(1)
+        for x, v in zip(hx, dm.tolist()):
+            per_prompt.append({"tag": tag, "id": x["id"], "category": x["category"],
+                               "mean_d_M": round(v, 5)})
         summary[tag] = {"adapter": path, "layers": f"{lo}-{hi}",
                         "mean_d": round(float(d[:, Mv].mean()), 5),
                         "mean_abs_d": round(float(d[:, Mv].abs().mean()), 5),
@@ -109,11 +154,18 @@ def main() -> int:
         if dev.type == "cuda":
             torch.cuda.empty_cache()
     out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
-    with open(out / "displacement.csv", "w", newline="") as f:
+    default_run = a.position == "gen_prompt" and a.s_file == S_FILE
+    sfx = "" if default_run else f"_{a.position}" + \
+        ("" if a.s_file == S_FILE else f"_{Path(a.s_file).stem}")
+    with open(out / f"displacement{sfx}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
-    (out / "displacement.json").write_text(json.dumps(
-        {"n_prompts": len(prompts), "s_file": a.s_file, "summary": summary}, indent=2))
-    print(f"displacement along S on {len(prompts)} HEx-PHI prompts, layers {lo}-{hi}:")
+    with open(out / f"displacement_per_prompt{sfx}.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(per_prompt[0])); w.writeheader(); w.writerows(per_prompt)
+    (out / f"displacement{sfx}.json").write_text(json.dumps(
+        {"n_prompts": len(prompts), "s_file": a.s_file, "s_mode": s_pos, "position": a.position,
+         "position_matches_S": matched, "summary": summary}, indent=2))
+    print(f"displacement along S ({s_pos}) at {a.position} on {len(prompts)} HEx-PHI prompts, "
+          f"layers {lo}-{hi}:")
     for t, s in summary.items():
         print(f"  {t:20s} mean d {s['mean_d']:>9.4f}  mean|d| {s['mean_abs_d']:>9.4f}  rms {s['rms_d']:>9.4f}")
     return 0
