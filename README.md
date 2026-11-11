@@ -13,6 +13,7 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 | 1b | Epoch-1 snapshot (step 157) of the same trajectory: safety drop holds (HEx-PHI 34%), looping persists (GPQA 36% truncated) | ✅ done |
 | 2 | SDP (γ = 0.5, L19–L32) at step 157: harm back to base (2.7% vs 34%), no looping, but 0% thinking on HEx-PHI. See [PHASE2_RESULTS.md](PHASE2_RESULTS.md) | ✅ done; forced-thinking check next (`run_forcethink.sh`) |
 | Step 1 | Is SDP's 0% think adoption a harm gate, a format gate, or untagged reasoning? Forced thinking, benign think adoption, XSTest, AIME-cue HEx-PHI, matched-position displacement. See [STEP1.md](STEP1.md) | code ready (`run_step1.sh`) |
+| Steps 2–4 | Judge robustness (Qi et al. prompt + second judge), CKA layer selection, probes, displacement-vs-harm Spearman, batch-8 retrain, γ sweep, STAR-1 mixing baseline. See [STEP2.md](STEP2.md) | code ready (`run_step2.sh`) |
 | 3 | Reasoning-format study (full CoT / Chain of Draft / no tags / answer only) | planned |
 
 **Phase 1 headline:** HEx-PHI harmful rises from ~2% to ~50% after benign reasoning SFT (harm almost
@@ -39,6 +40,13 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `run_step1.sh` | Step 1: one resumable command for all diagnostics below, then `step1_report.py` |
 | `inspect_generations.py` | CPU: untagged reasoning in saved generations + a private sample csv for manual reading |
 | `step1_report.py` | Step 1 summary table and reading guide (metrics only) |
+| `run_step2.sh` | Steps 2–4: `STAGES` rejudge / analysis / train, `JOBS` amsft_eb8, sdp_eb8, sdp_g*, star1mix50 |
+| `rejudge.py` | re-score saved HEx-PHI outputs with another judge prompt/model; agreement stats |
+| `layer_analysis.py` | cached hidden states → CKA layer selection (§3.4, C.3) and probes (C.4) |
+| `displacement_vs_harm.py` | per-prompt displacement vs harm-score change, Spearman (§3.5, C.6) |
+| `mix_safety_data.py` | AM-SFT data + N STAR-1 examples for the data-mixing baseline |
+| `stats_utils.py` | Spearman, Cohen's kappa, confusion matrix (numpy only) |
+| `judge_prompts/` | Qi et al. 2023 HEx-PHI judge prompt (verbatim, MIT) |
 | `run_recheck.sh` | reasoning re-check: GPQA/AIME (+ optional HEx-PHI) under R1-style decoding, loop metrics |
 | `sync_to_hf.py` | backs up / restores runs (metrics, adapters, checkpoints, responses) to a private Hugging Face repo |
 
