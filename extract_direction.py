@@ -18,6 +18,16 @@ Outputs (runs/direction/):
   direction_stats.csv  per layer: |mean diff|, held-out pair accuracy, separation, cos(S_l, S_l-1)
   direction.json       config, data/model hashes, summary
 No model text is generated; AdvBench strings are only fed as inputs (data-handling rule).
+
+Step 1 follow-up: --mode prompt_contrast (NOT the paper's S)
+  The paper's S is measured at the END of a full conversation (after the refusal/compliance
+  text). displacement.py measures at the generation-prompt token, where refusal and compliance
+  conversations are identical, so S cannot be re-measured there. prompt_contrast builds the
+  standard prompt-level refusal direction instead (Arditi et al. 2024):
+      S_l = normalize( mean(h_harmful_l) - mean(h_harmless_l) )  at the generation-prompt token
+  harmful = the 520 AdvBench goals, harmless = 520 Alpaca instructions (seeded sample).
+  Same sign convention: positive = toward the refusing side. Writes S_prompt_contrast.pt and
+  direction_stats_prompt_contrast.csv, including cos(S_advbench_l, S_prompt_l) per layer.
 """
 from __future__ import annotations
 
@@ -51,7 +61,29 @@ class Config:
     precision: str = "bf16"
     out_dir: str = "runs/direction"
     expected_rows: int = 520
+    # prompt_contrast mode only
+    alpaca_dir: str = "assets/alpaca"
 # =============================================================================
+
+
+def render_prompt(tok, user: str, system: str | None) -> str:
+    """Prompt only, ending at the generation prompt (where displacement.py measures)."""
+    msgs = [{"role": "user", "content": user}]
+    if system is not None:
+        msgs = [{"role": "system", "content": system}] + msgs
+    return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+
+
+def alpaca_instructions(d: str, n: int, seed: int) -> list[str]:
+    files = sorted(Path(d).rglob("*.json"))
+    if not files:
+        raise SystemExit(f"no Alpaca json under {d}: run `python download_assets.py --only alpaca`")
+    data = json.loads(files[0].read_text(encoding="utf-8"))
+    pool = [x["instruction"].strip() for x in data
+            if x.get("instruction", "").strip() and not str(x.get("input", "")).strip()]
+    # different seed offset from eval_harness's benign set, so the two samples are independent
+    random.Random(seed + 1).shuffle(pool)
+    return pool[:n]
 
 
 def sha256_file(p) -> str:
@@ -99,9 +131,13 @@ def main() -> int:
     ap.add_argument("--summary-layers", default="19-32", help="layers summarised (SDP's M)")
     ap.add_argument("--batch-size", type=int); ap.add_argument("--limit", type=int,
                     help="smoke only: use the first N prompts")
+    ap.add_argument("--mode", choices=["refusal_compliance", "prompt_contrast"],
+                    default="refusal_compliance",
+                    help="refusal_compliance = paper's S (default); prompt_contrast = Step 1 check")
+    ap.add_argument("--alpaca-dir")
     a = ap.parse_args()
     cfg = Config()
-    for k in ("model_dir", "advbench_csv", "out_dir", "batch_size"):
+    for k in ("model_dir", "advbench_csv", "out_dir", "batch_size", "alpaca_dir"):
         if getattr(a, k) is not None:
             setattr(cfg, k, getattr(a, k))
     random.seed(cfg.seed); np.random.seed(cfg.seed); torch.manual_seed(cfg.seed)
@@ -124,12 +160,24 @@ def main() -> int:
     model = AutoModelForCausalLM.from_pretrained(cfg.model_dir, dtype=dtype).to(dev).eval()
     n_layers, d = model.config.num_hidden_layers, model.config.hidden_size
 
-    ref = [render(tok, r["goal"], cfg.refusal, cfg.system_prompt) for r in rows]
-    com = [render(tok, r["goal"], r["target"], cfg.system_prompt) for r in rows]
+    paired = a.mode == "refusal_compliance"
+    if paired:
+        ref = [render(tok, r["goal"], cfg.refusal, cfg.system_prompt) for r in rows]
+        com = [render(tok, r["goal"], r["target"], cfg.system_prompt) for r in rows]
+    else:   # Hr = harmful prompts, Hc = harmless prompts, both at the generation-prompt token
+        ref = [render_prompt(tok, r["goal"], cfg.system_prompt) for r in rows]
+        com = [render_prompt(tok, u, cfg.system_prompt)
+               for u in alpaca_instructions(cfg.alpaca_dir, len(rows), cfg.seed)]
+        if len(com) < len(ref):
+            raise SystemExit(f"only {len(com)} Alpaca instructions for {len(ref)} harmful prompts")
+        flags.append("mode=prompt_contrast: AdvBench goals vs Alpaca instructions at the "
+                     "generation-prompt token (NOT the paper's S)")
     t0 = time.time()
-    print(f"refusal states ({len(ref)})"); Hr = last_token_states(model, tok, ref, cfg.batch_size, dev)
-    print(f"compliance states ({len(com)})"); Hc = last_token_states(model, tok, com, cfg.batch_size, dev)
-    diff = Hr - Hc                                            # [N, L+1, d]
+    print(f"{'refusal' if paired else 'harmful-prompt'} states ({len(ref)})")
+    Hr = last_token_states(model, tok, ref, cfg.batch_size, dev)
+    print(f"{'compliance' if paired else 'harmless-prompt'} states ({len(com)})")
+    Hc = last_token_states(model, tok, com, cfg.batch_size, dev)
+    diff = Hr - Hc        # [N, L+1, d]; for prompt_contrast the pairing is arbitrary (index order)
     N = diff.size(0)
     S = unit(diff.mean(0))                                    # [L+1, d]  final S: all prompts
 
@@ -150,21 +198,34 @@ def main() -> int:
     mean_norm = diff.mean(0).norm(dim=-1)
 
     out = Path(cfg.out_dir); out.mkdir(parents=True, exist_ok=True)
+    suffix = "" if paired else "_prompt_contrast"
+    s_name = "S_advbench.pt" if paired else "S_prompt_contrast.pt"
+    cos_paper = None
+    if not paired and (out / "S_advbench.pt").exists():     # agreement with the paper's S
+        S_paper = torch.load(out / "S_advbench.pt", map_location="cpu")["S"].float()
+        if S_paper.shape == S.shape:
+            cos_paper = (S * S_paper).sum(-1)
     stats = []
     for l in range(n_layers + 1):
-        stats.append({"layer": l, "mean_diff_norm": round(float(mean_norm[l]), 4),
-                      "heldout_pair_acc": round(float(pair_acc[l]), 4),
-                      "heldout_threshold_acc": round(float(thr_acc[l]), 4),
-                      "heldout_separation_d": round(float(sep[l]), 3),
-                      "cos_with_prev_layer": round(float(cos_prev[l]), 4),
-                      "cos_full_vs_80pct": round(float(cos_split[l]), 4)})
-    with open(out / "direction_stats.csv", "w", newline="") as f:
+        s = {"layer": l, "mean_diff_norm": round(float(mean_norm[l]), 4),
+             # pair accuracy only means something when refusal/compliance share a prompt
+             "heldout_pair_acc": round(float(pair_acc[l]), 4) if paired else None,
+             "heldout_threshold_acc": round(float(thr_acc[l]), 4),
+             "heldout_separation_d": round(float(sep[l]), 3),
+             "cos_with_prev_layer": round(float(cos_prev[l]), 4),
+             "cos_full_vs_80pct": round(float(cos_split[l]), 4)}
+        if not paired:
+            s["cos_with_S_advbench"] = round(float(cos_paper[l]), 4) if cos_paper is not None else None
+        stats.append(s)
+    with open(out / f"direction_stats{suffix}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(stats[0])); w.writeheader(); w.writerows(stats)
 
     meta = {"config": asdict(cfg), "flags": flags, "n_prompts": N, "n_layers": n_layers,
             "hidden_size": d, "layer_convention": "S[l] <-> HF hidden_states[l]; 0=embeddings, "
             "l=output of block l (1-based), last=final norm",
-            "position": "last non-pad token of full conversation (ends '<|im_end|>\\n')",
+            "mode": a.mode,
+            "position": ("last non-pad token of full conversation (ends '<|im_end|>\\n')" if paired
+                         else "last token of the prompt with the generation prompt appended"),
             "advbench_sha256": sha256_file(cfg.advbench_csv),
             "model_fingerprint": weight_fingerprint(model), "device": str(dev),
             "dtype": str(dtype), "torch": str(torch.__version__),
@@ -173,23 +234,26 @@ def main() -> int:
     lo, hi = (int(x) for x in a.summary_layers.split("-"))
     M = [l for l in range(lo, hi + 1) if l <= n_layers]
     meta["summary_M"] = {"layers": a.summary_layers,
-        "heldout_pair_acc_mean": round(float(pair_acc[M].mean()), 4) if M else None,
+        "heldout_pair_acc_mean": round(float(pair_acc[M].mean()), 4) if M and paired else None,
         "heldout_threshold_acc_mean": round(float(thr_acc[M].mean()), 4) if M else None,
         "cos_full_vs_80pct_min": round(float(cos_split[M].min()), 4) if M else None}
-    torch.save({"S": S.contiguous(), "meta": meta}, out / "S_advbench.pt")
-    meta["S_sha256"] = sha256_file(out / "S_advbench.pt")
-    (out / "direction.json").write_text(json.dumps(meta, indent=2))
+    if cos_paper is not None and M:
+        meta["summary_M"]["cos_with_S_advbench_mean"] = round(float(cos_paper[M].mean()), 4)
+    torch.save({"S": S.contiguous(), "meta": meta}, out / s_name)
+    meta["S_sha256"] = sha256_file(out / s_name)
+    (out / f"direction{suffix}.json").write_text(json.dumps(meta, indent=2))
 
     print(f"{'layer':>5s} {'|diff|':>8s} {'pairAcc':>8s} {'thrAcc':>7s} {'sep_d':>7s} {'cosPrev':>8s} {'cos80':>6s}")
     for s in stats:
         if s["layer"] % 4 == 0 or s["layer"] in M:
-            print(f"{s['layer']:>5d} {s['mean_diff_norm']:>8.2f} {s['heldout_pair_acc']:>8.3f} "
+            pa = f"{s['heldout_pair_acc']:>8.3f}" if s["heldout_pair_acc"] is not None else f"{'-':>8s}"
+            print(f"{s['layer']:>5d} {s['mean_diff_norm']:>8.2f} {pa} "
                   f"{s['heldout_threshold_acc']:>7.3f} {s['heldout_separation_d']:>7.2f} "
                   f"{s['cos_with_prev_layer']:>8.3f} {s['cos_full_vs_80pct']:>6.3f}")
     print(f"L{a.summary_layers} summary:", meta["summary_M"])
     for fl in flags:
         print("FLAG:", fl)
-    print(f"saved {out / 'S_advbench.pt'}")
+    print(f"saved {out / s_name}")
     return 0
 
 

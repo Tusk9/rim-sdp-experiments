@@ -54,6 +54,11 @@ ADVBENCH_URL = (
     "data/advbench/harmful_behaviors.csv"
 )
 
+# Step 1 follow-up (not a paper asset): XSTest over-refusal set (Röttger et al. 2024).
+# 250 safe prompts that look unsafe + 200 unsafe contrast prompts. Eval only.
+XSTEST_URL = "https://raw.githubusercontent.com/paul-rottger/xstest/main/xstest_prompts.csv"
+XSTEST_SHA256 = "11783fb294ed017473ee53c207d71f2161c7672c8d0b037501e78387f801cb5a"  # 2026-11-10
+
 # name -> spec. `required` = needed for Phase 1/2 of the replication.
 HF_ASSETS = {
     "model": dict(
@@ -231,6 +236,30 @@ def fetch_advbench() -> dict:
     return rec
 
 
+def fetch_xstest() -> dict:
+    rec = {"name": "xstest", "source": XSTEST_URL, "required": False,
+           "license": "see XSTest repo", "note": "Step 1 over-refusal eval only."}
+    out = ROOT / "xstest" / "xstest_prompts.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(XSTEST_URL, timeout=60) as r:
+            out.write_bytes(r.read())
+    except Exception as e:
+        rec.update(status="DOWNLOAD_FAILED", detail=repr(e)); return rec
+    with open(out, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    cols = list(rows[0].keys()) if rows else []
+    labels = {}
+    for r in rows:
+        labels[r.get("label")] = labels.get(r.get("label"), 0) + 1
+    digest = sha256_file(out)
+    ok = len(rows) == 450 and {"prompt", "label", "type"} <= set(cols)
+    rec.update(status="OK" if ok else "CHECK_FAILED", local_file=str(out), rows=len(rows),
+               columns=cols, labels=labels, sha256=digest,
+               sha256_matches_pinned=digest == XSTEST_SHA256)
+    return rec
+
+
 # ------------------------------ checks ---------------------------------------
 def check(name: str, rec: dict) -> None:
     if rec.get("status") != "OK":
@@ -282,7 +311,8 @@ def check(name: str, rec: dict) -> None:
 # ------------------------------- main ----------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", nargs="*", help="subset: model hexphi gpqa safetybench aime24 aime25 alpaca am advbench")
+    ap.add_argument("--only", nargs="*", help="subset: model hexphi gpqa safetybench aime24 aime25 "
+                    "alpaca am advbench xstest (xstest only when named)")
     args = ap.parse_args()
     want = set(args.only) if args.only else None
 
@@ -308,6 +338,11 @@ def main() -> int:
         print("-> advbench (GitHub)")
         rec = fetch_advbench(); records.append(rec)
         print(f"   {rec['status']}  rows={rec.get('rows')}")
+    if want and "xstest" in want:          # Step 1 only: fetched on request, not by default
+        print("-> xstest (GitHub)")
+        rec = fetch_xstest(); records.append(rec)
+        print(f"   {rec['status']}  rows={rec.get('rows')}  labels={rec.get('labels')}  "
+              f"pinned_sha_match={rec.get('sha256_matches_pinned')}")
 
     manifest = {
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
