@@ -59,6 +59,12 @@ ADVBENCH_URL = (
 XSTEST_URL = "https://raw.githubusercontent.com/paul-rottger/xstest/main/xstest_prompts.csv"
 XSTEST_SHA256 = "11783fb294ed017473ee53c207d71f2161c7672c8d0b037501e78387f801cb5a"  # 2026-11-10
 
+# Step 4 baseline (not a paper asset): STAR-1, 1k safety-reasoning examples (Apache-2.0),
+# pinned to a commit of the authors' GitHub repo (same file as the HF dataset UCSC-VLAA/STAR-1).
+STAR1_URL = ("https://raw.githubusercontent.com/UCSC-VLAA/STAR-1/"
+             "b49333598887845f148ed1b4d2576dc2bff7581a/data/STAR-1.json")
+STAR1_SHA256 = "cfff9b23307914ecf8a94a1d5526f71f7144fcfc5f651741bea1ac41b3184db4"
+
 # name -> spec. `required` = needed for Phase 1/2 of the replication.
 HF_ASSETS = {
     "model": dict(
@@ -260,6 +266,25 @@ def fetch_xstest() -> dict:
     return rec
 
 
+def fetch_star1() -> dict:
+    rec = {"name": "star1", "source": STAR1_URL, "required": False, "license": "Apache-2.0",
+           "note": "Step 4 safety-mixing baseline only."}
+    out = ROOT / "star1" / "STAR-1.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(STAR1_URL, timeout=120) as r:
+            out.write_bytes(r.read())
+    except Exception as e:
+        rec.update(status="DOWNLOAD_FAILED", detail=repr(e)); return rec
+    digest = sha256_file(out)
+    rows = json.loads(out.read_text(encoding="utf-8"))
+    ok = (digest == STAR1_SHA256 and len(rows) == 1000
+          and {"question", "response"} <= set(rows[0]))
+    rec.update(status="OK" if ok else "CHECK_FAILED", local_file=str(out), rows=len(rows),
+               sha256=digest, sha256_matches_pinned=digest == STAR1_SHA256)
+    return rec
+
+
 # ------------------------------ checks ---------------------------------------
 def check(name: str, rec: dict) -> None:
     if rec.get("status") != "OK":
@@ -312,7 +337,7 @@ def check(name: str, rec: dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", help="subset: model hexphi gpqa safetybench aime24 aime25 "
-                    "alpaca am advbench xstest (xstest only when named)")
+                    "alpaca am advbench xstest star1 (xstest/star1 only when named)")
     args = ap.parse_args()
     want = set(args.only) if args.only else None
 
@@ -338,6 +363,10 @@ def main() -> int:
         print("-> advbench (GitHub)")
         rec = fetch_advbench(); records.append(rec)
         print(f"   {rec['status']}  rows={rec.get('rows')}")
+    if want and "star1" in want:           # Step 4 only: fetched on request, not by default
+        print("-> star1 (GitHub, pinned commit)")
+        rec = fetch_star1(); records.append(rec)
+        print(f"   {rec['status']}  rows={rec.get('rows')}  pinned_sha_match={rec.get('sha256_matches_pinned')}")
     if want and "xstest" in want:          # Step 1 only: fetched on request, not by default
         print("-> xstest (GitHub)")
         rec = fetch_xstest(); records.append(rec)

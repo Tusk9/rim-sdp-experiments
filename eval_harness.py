@@ -518,6 +518,8 @@ class Judge:
             self.template = Path(cfg.judge_prompt_file).read_text() if cfg.judge_prompt_file \
                 else DEFAULT_JUDGE_PROMPT
         self.template_sha = sha(self.template)
+        # Templates in the Qi et al. 2023 style answer in text ("#thescore: N"), not JSON
+        self.text_format = "#thescore" in self.template
         self.cache_path = cache_path
         self.cache = {}
         if cache_path.exists():
@@ -557,21 +559,33 @@ class Judge:
                  "fingerprint": None}
         else:
             msg = self.template.replace("{instruction}", instr).replace("{response}", resp_in)
-            msg = msg.replace("{{", "{").replace("}}", "}")
-            out = self._create_with_retry(msg)
+            if not self.text_format:
+                msg = msg.replace("{{", "{").replace("}}", "}")
+            out = self._create_with_retry(msg, json_mode=not self.text_format)
             if out is None:
                 return {"key": key, "score": None, "reason": "judge_failed", "model": None,
                         "fingerprint": None, "resp_truncated_for_judge": truncated}
             raw = out.choices[0].message.content
-            try:
-                score = int(json.loads(raw)["score"])
-            except Exception:
-                m = re.search(rf"[1-{self.n_classes}]", raw or "")
-                score = int(m.group()) if m else None
+            reason = ""
+            if self.text_format:
+                m = re.search(rf"#thescore:\s*\**\s*([1-{self.n_classes}])\b", raw or "")
+                score = int(m.group(1)) if m else None
+                mr = re.search(r"#thereason:\s*(.*?)(?:#thescore:|$)", raw or "", re.S)
+                reason = mr.group(1).strip() if mr else ""
+            else:
+                try:
+                    score = int(json.loads(raw)["score"])
+                except Exception:
+                    m = re.search(rf"[1-{self.n_classes}]", raw or "")
+                    score = int(m.group()) if m else None
+                if raw and raw.strip().startswith("{"):
+                    try:
+                        reason = json.loads(raw).get("reason", "")
+                    except Exception:
+                        reason = ""
             if score is not None and not 1 <= score <= self.n_classes:
                 score = None                     # out-of-range answer counts as a judge failure
-            r = {"key": key, "score": score, "reason": (json.loads(raw).get("reason", "")
-                 if raw and raw.strip().startswith("{") else "")[:300],
+            r = {"key": key, "score": score, "reason": str(reason)[:300],
                  "model": out.model, "fingerprint": out.system_fingerprint}
         r["resp_truncated_for_judge"] = truncated
         return r
@@ -586,16 +600,16 @@ class Judge:
         if slot > now:
             time.sleep(slot - now)
 
-    def _create_with_retry(self, msg: str):
+    def _create_with_retry(self, msg: str, json_mode: bool = True):
         import openai
         t0, attempt = time.time(), 0
         while True:
             self._throttle()
             try:
+                kw = {"response_format": {"type": "json_object"}} if json_mode else {}
                 return self.client.chat.completions.create(
                     model=self.cfg.judge_model, temperature=0, seed=self.cfg.seed,
-                    response_format={"type": "json_object"},
-                    messages=[{"role": "user", "content": msg}])
+                    messages=[{"role": "user", "content": msg}], **kw)
             except openai.RateLimitError as e:
                 body = str(e)
                 if "insufficient_quota" in body or "credit_balance" in body:
