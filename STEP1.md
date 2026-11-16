@@ -30,7 +30,8 @@ It takes about 6–8 GPU hours on a g6e.2xlarge (about $15–20), plus a few dol
 | 3 benign | 300 Alpaca instructions (think adoption, math-like vs non-math) + 450 XSTest prompts | `*_benign` |
 | 4 aimesuffix | HEx-PHI with the exact AIME instruction appended; the judge sees the original prompt | `*_aimesuffix` |
 | 5 displace | `extract_direction.py --mode prompt_contrast`, then `displacement.py` at matched positions | – |
-| 6 report | `step1_report.py` | – |
+| 6 gate | `gate_probe.py`: P(first token = `<think>`) on every prompt set, one forward pass per prompt (~10–20 GPU min) | – |
+| 7 report | `step1_report.py` | – |
 
 All three models are covered: `base`, `amsft_step157` and `sdp_step157`. Decoding and the judge are the same as in Phase 1/2. No existing `results.json` is overwritten.
 
@@ -45,6 +46,16 @@ Stage 1 writes `runs/inspect/step1_sample.csv`: 30 responses per model and bench
 - **AIME cue:** the suffix is exactly the AIME prompt's instruction ("Please reason step by step, and put your final answer within \boxed{}."). `--hexphi-suffix reason` uses "Please reason step by step." instead.
 - **Prompt-contrast direction:** this is the AdvBench goals vs. 520 Alpaca instructions at the generation-prompt token (Arditi et al. 2024 style). It is not the paper's S. It exists only for the sign check, and its cosine with S_advbench is reported per layer.
 - **Untagged-reasoning heuristic:** a response counts as reasoning if it has at least 2 of the 12 marker phrases in `inspect_generations.py`. The annotated sample is the real check.
+
+## Gate probe (stage 6)
+
+The sampled think rates above answer "how often does the model think". `gate_probe.py` measures the switch directly: for each prompt, the probability that the first response token is the first token of `<think>`, from one forward pass. No sampling, no judge, no generated text, so it's cheap and has no sampling noise. Prompt sets: HEx-PHI, HEx-PHI + AIME cue, benign non-math, benign math-like, XSTest safe/unsafe, GPQA, AIME24.
+
+It reports mean probability per set with bootstrap CIs, and two AUROCs: benign non-math vs. HEx-PHI, and XSTest safe vs. unsafe. An AUROC near 0.5 means the switch ignores harm (format gate); well above 0.5 means it tracks harm. With `--s-file` it also builds a "think direction" (top vs. bottom quartile of P(think) on benign prompts only) and reports its cosine with S per layer: does the switch live near the direction SDP penalises?
+
+Run on its own: `python gate_probe.py --adapter amsft_step157=$AMS --adapter sdp_step157=$SDP --s-file runs/direction/S_advbench.pt`. Outputs go to `runs/gate/` (prompt ids and numbers only).
+
+MY CHOICES: the first `<think>` token as the statistic (the full-sequence log-prob is saved too); "thinks" = P > 0.5 as a greedy proxy, compared with, not equated to, the sampled rates; think-direction quartiles from benign prompts only, so T isn't a harmful-vs-benign contrast by construction.
 
 ## Reading the result
 

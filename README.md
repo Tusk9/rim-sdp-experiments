@@ -40,6 +40,7 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `run_step1.sh` | Step 1: one resumable command for all diagnostics below, then `step1_report.py` |
 | `inspect_generations.py` | CPU: untagged reasoning in saved generations + a private sample csv for manual reading |
 | `step1_report.py` | Step 1 summary table and reading guide (metrics only) |
+| `gate_probe.py` | P(first token = `<think>`) per prompt set from one forward pass (no sampling, no judge); harm-vs-format AUROCs; optional think direction vs S |
 | `run_step2.sh` | Steps 2–4: `STAGES` rejudge / analysis / train, `JOBS` amsft_eb8, sdp_eb8, sdp_g*, star1mix50 |
 | `rejudge.py` | re-score saved HEx-PHI outputs with another judge prompt/model; agreement stats |
 | `layer_analysis.py` | cached hidden states → CKA layer selection (§3.4, C.3) and probes (C.4) |

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
 step1_report.py — one table for Step 1 (run by run_step1.sh, safe to run any time).
-Reads only metrics files (results.json, displacement*.json, untagged summary); prints no
+Reads only metrics files (results.json, displacement*.json, untagged summary,
+gate_summary.json); prints no
 model text. Missing pieces show as '-'.
 
 Question: SDP thinks on 0% of HEx-PHI prompts. Is that
@@ -96,6 +97,25 @@ def main():
         print(f"  {label:58s} {vals}")
     print("  (positive = toward the refusing side; the paper's account predicts AM-SFT < 0)")
 
+    gp = Path("runs/gate/gate_summary.json")
+    G = json.loads(gp.read_text()) if gp.exists() else {}
+    GS = G.get("summary", {})
+    table("6. Gate probe: mean P(first token = <think>) (no sampling, no judge)", [
+        (lbl, (lambda k: lambda m: g(GS, m, k, "mean_p_think"))(k)) for lbl, k in [
+            ("HEx-PHI", "hexphi"), ("HEx-PHI + AIME cue", "hexphi_aime"),
+            ("benign, non-math", "benign_nonmath"), ("benign, math-like", "benign_math"),
+            ("XSTest safe", "xstest_safe"), ("XSTest unsafe", "xstest_unsafe"),
+            ("GPQA", "gpqa"), ("AIME24", "aime24")]
+    ] + [
+        ("AUROC benign_nonmath > HEx-PHI", lambda m: g(GS, m, "auroc", "benign_nonmath_vs_hexphi")),
+        ("AUROC XSTest safe > unsafe", lambda m: g(GS, m, "auroc", "xstest_safe_vs_unsafe")),
+    ])
+    for t, td in G.get("think_direction", {}).items():
+        c = td.get("cos_T_S_per_layer")
+        if c:
+            print(f"  cos(think direction, S) {SHORT.get(t, t)}: max |cos| "
+                  f"{max(abs(v) for v in c):.3f} (layer {max(range(len(c)), key=lambda i: abs(c[i]))})")
+
     # ---------------------------------------------------------------- reading guide
     print("\nREADING (heuristic thresholds, check against the numbers above):")
     sdp_nm = g(B["sdp_step157"], "benign", "think_adoption_non_math", "pct")
@@ -109,6 +129,11 @@ def main():
                   "HARM-SPECIFIC gate")
         else:
             print(f"  gate: mixed ({sdp_nm}% benign non-math vs {sdp_hx}% harmful) -> read table 1")
+    au = g(GS, "sdp_step157", "auroc", "benign_nonmath_vs_hexphi")
+    if au is not None:
+        print(f"  gate probe: SDP AUROC(benign non-math > harmful) = {au} -> "
+              + ("the gate tracks harm" if au >= 0.75 else
+                 "the gate barely tracks harm (format gate)" if au <= 0.6 else "weak harm signal"))
     un = g(U, "sdp_step157", "hexphi", "untagged_reasoning_pct_of_untagged")
     if un is not None:
         print(f"  untagged: {un}% of SDP's tag-free HEx-PHI answers read like reasoning "
