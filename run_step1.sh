@@ -9,7 +9,9 @@
 #   4 aimesuffix HEx-PHI with the exact AIME instruction appended (format cue)
 #   5 displace   sign check with matched positions (S_advbench @ refusal_end,
 #                S_prompt_contrast @ gen_prompt)
-#   6 report     one table: runs/step1/report.txt
+#   6 gate       gate_probe.py: P(first token = <think>) per prompt set, no sampling/judge
+#                (~10-20 GPU minutes; added after Step 1 was first merged)
+#   7 report     one table: runs/step1/report.txt
 #
 # Models: base, amsft_step157, sdp_step157. Eval settings identical to Phase 1/2
 # (model default decoding, 16k, gpt-4o-mini-2024-07-18 judge). New tags only: no existing
@@ -125,6 +127,16 @@ if ! skip displace && ! stage_done displace; then
   mark displace
 fi
 
-# ---- 6 report -------------------------------------------------------------------------
-echo "== [6 report]"
+# ---- 6 gate probe (forward passes only) -----------------------------------------------
+if ! skip gate && ! stage_done gate; then
+  echo "== [6 gate]"
+  [ -f assets/gpqa/gpqa_main.csv ] || echo "WARN: no GPQA csv, gate probe skips gpqa"
+  python gate_probe.py --adapter "amsft_step157=$AMS" --adapter "sdp_step157=$SDP" \
+      ${EVAL_EXTRA:+--limit 20} \
+      $( [ -f runs/direction/S_advbench.pt ] && echo --s-file runs/direction/S_advbench.pt )
+  [ -n "$EVAL_EXTRA" ] || mark gate
+fi
+
+# ---- 7 report -------------------------------------------------------------------------
+echo "== [7 report]"
 python step1_report.py | tee runs/step1/report.txt
