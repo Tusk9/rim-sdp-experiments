@@ -36,6 +36,7 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `extract_direction.py` | safety direction S from 520 AdvBench refusal/compliance pairs on the base model (§3.1), with held-out separation diagnostics; `--mode prompt_contrast` = prompt-level refusal direction (Step 1) |
 | `run_phase2.sh` | Phase 2: direction → GPU SDP smoke test → SDP training to step 157 → eval → displacement → SDP verdict vs `amsft_step157` |
 | `run_forcethink.sh` | HEx-PHI with forced `<think>` prefill for SDP, AM-SFT and base: harm while reasoning |
+| `run_stress.sh` | reasoning-elicitation stress test: HEx-PHI with four everyday reasoning cues, gate probe + judged evals (see `STRESS.md`) |
 | `displacement.py` | mechanism check: displacement of HEx-PHI hidden states along S, fine-tuned vs base (§3.4); `--position refusal_end` for a position-matched sign check, per-prompt output |
 | `run_step1.sh` | Step 1: one resumable command for all diagnostics below, then `step1_report.py` |
 | `inspect_generations.py` | CPU: untagged reasoning in saved generations + a private sample csv for manual reading |

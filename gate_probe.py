@@ -11,6 +11,7 @@ computed in one forward pass per prompt, for each model, on several prompt sets:
 
     hexphi              harmful (330)
     hexphi_aime         harmful + the exact AIME instruction appended (format cue)
+    hexphi_<cue>        harmful + other cues from eval_harness.SUFFIX_ALIASES (--cues)
     benign_nonmath      Alpaca instructions, MATHY regex false
     benign_math         Alpaca instructions, MATHY regex true
     xstest_safe         safe prompts that look unsafe
@@ -55,8 +56,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from eval_harness import (AIME_SUFFIX, Config, load_aime, load_benign, load_gpqa, load_hexphi,
-                          load_xstest)
+from eval_harness import (SUFFIX_ALIASES, Config, load_aime, load_benign, load_gpqa,
+                          load_hexphi, load_xstest)
 
 # =============================== CONFIG ======================================
 MODEL_DIR = "assets/model"
@@ -76,20 +77,20 @@ THINK_DIR_SETS = ("benign_nonmath", "benign_math", "xstest_safe", "gpqa", "aime2
 # =============================================================================
 
 
-def prompt_sets(cfg: Config, limit: int | None) -> dict[str, list[dict]]:
+def prompt_sets(cfg: Config, limit: int | None, cues=("aime",)) -> dict[str, list[dict]]:
     hx = load_hexphi(cfg)
-    cfg_a = Config(**{**cfg.__dict__, "hexphi_suffix": AIME_SUFFIX})
-    hx_a = load_hexphi(cfg_a)
     bn = load_benign(cfg)
     xs = load_xstest(cfg)
-    sets = {
-        "hexphi": [{"id": x["id"], "user": x["user"]} for x in hx],
-        "hexphi_aime": [{"id": x["id"], "user": x["user"]} for x in hx_a],
+    sets = {"hexphi": [{"id": x["id"], "user": x["user"]} for x in hx]}
+    for c in cues:                      # HEx-PHI + a format / reasoning cue (same prompt ids)
+        hx_c = load_hexphi(Config(**{**cfg.__dict__, "hexphi_suffix": SUFFIX_ALIASES[c]}))
+        sets[f"hexphi_{c}"] = [{"id": x["id"], "user": x["user"]} for x in hx_c]
+    sets.update({
         "benign_nonmath": [x for x in bn if not x["mathy"]],
         "benign_math": [x for x in bn if x["mathy"]],
         "xstest_safe": [x for x in xs if x["label"] == "safe"],
         "xstest_unsafe": [x for x in xs if x["label"] == "unsafe"],
-    }
+    })
     if Path(cfg.gpqa_file).exists():
         sets["gpqa"] = load_gpqa(cfg)
     try:
@@ -169,6 +170,8 @@ def main() -> int:
     ap.add_argument("--out-dir", default=OUT_DIR)
     ap.add_argument("--s-file", help="also compute the think direction and cos with S")
     ap.add_argument("--limit", type=int, help="first N prompts per set (smoke only)")
+    ap.add_argument("--cues", nargs="*", default=["aime"], choices=sorted(SUFFIX_ALIASES),
+                    help="HEx-PHI + cue sets to probe (stress test: reason careful detailed expert)")
     ap.add_argument("--hexphi-dir"); ap.add_argument("--alpaca-dir")
     ap.add_argument("--xstest-file"); ap.add_argument("--gpqa-file"); ap.add_argument("--aime24-dir")
     a = ap.parse_args()
@@ -187,7 +190,7 @@ def main() -> int:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     think_ids = tok(THINK, add_special_tokens=False).input_ids
-    sets = prompt_sets(cfg, a.limit)
+    sets = prompt_sets(cfg, a.limit, a.cues)
     print("prompt sets: " + ", ".join(f"{k}={len(v)}" for k, v in sets.items()))
     S = torch.load(a.s_file, map_location="cpu")["S"].float() if a.s_file else None
 
@@ -227,10 +230,11 @@ def main() -> int:
             # does the AIME cue raise p_think on the SAME harmful prompts? (paired, sign test)
             "hexphi_aime_vs_hexphi": auroc(g("hexphi_aime"), g("hexphi")),
         }
-        if len(g("hexphi")) and len(g("hexphi_aime")) == len(g("hexphi")):
-            d = g("hexphi_aime") - g("hexphi")
-            summary[tag]["aime_cue_paired"] = {"mean_delta": round(float(d.mean()), 4),
-                                               "frac_increase": round(float((d > 0).mean()), 4)}
+        for c in a.cues:                       # paired: same prompts with vs without the cue
+            if len(g("hexphi")) and len(g(f"hexphi_{c}")) == len(g("hexphi")):
+                d = g(f"hexphi_{c}") - g("hexphi")
+                summary[tag][f"{c}_cue_paired"] = {"mean_delta": round(float(d.mean()), 4),
+                                                   "frac_increase": round(float((d > 0).mean()), 4)}
         if S is not None and states:
             P = np.concatenate([p for p, _ in states.values()])
             H = torch.cat([h for _, h in states.values()])
@@ -253,7 +257,8 @@ def main() -> int:
             torch.cuda.empty_cache()
 
     out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
-    sfx = f"_limit{a.limit}" if a.limit else ""
+    sfx = ("" if a.cues == ["aime"] else "_cues-" + "-".join(a.cues)) + \
+          (f"_limit{a.limit}" if a.limit else "")
     with open(out / f"gate_per_prompt{sfx}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(per_prompt[0])); w.writeheader(); w.writerows(per_prompt)
     meta = {"think_prefix": THINK, "think_token_ids": think_ids,
