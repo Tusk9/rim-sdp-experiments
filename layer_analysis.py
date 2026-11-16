@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -48,7 +49,7 @@ import torch
 import eval_harness as E
 from displacement import load_hexphi, states
 
-OUT = Path("runs/analysis")
+OUT = Path(os.environ.get("RIM_ANALYSIS_DIR", "runs/analysis"))   # run_7b.sh: runs/analysis_7b
 MODEL_DIR = "assets/model"
 
 

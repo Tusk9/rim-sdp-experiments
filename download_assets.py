@@ -41,6 +41,10 @@ LOG_DIR = Path("runs/assets")
 
 MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 MODEL_EXPECT = {"num_hidden_layers": 36, "hidden_size": 2048}  # context file §2
+# Scale-up run (run_7b.sh, not Phase 1/2): the paper's second model. Fetched only when named
+# (`--only model_7b`), ~15 GB.
+MODEL_7B_ID = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_7B_EXPECT = {"num_hidden_layers": 28, "hidden_size": 3584}
 
 AM_REPO = "a-m-team/AM-DeepSeek-R1-Distilled-1.4M"
 # [UNSPECIFIED] The paper says "first 10,000 examples" but the repo is split into configs
@@ -71,6 +75,11 @@ HF_ASSETS = {
         repo_id=MODEL_ID, repo_type="model", required=True,
         allow=["*.json", "*.safetensors", "*.txt", "merges.txt", "vocab.json", "LICENSE*"],
         license="Qwen-Research (non-commercial research)",
+    ),
+    "model_7b": dict(
+        repo_id=MODEL_7B_ID, repo_type="model", required=False, named_only=True,
+        allow=["*.json", "*.safetensors", "*.txt", "merges.txt", "vocab.json", "LICENSE*"],
+        license="Apache-2.0", note="run_7b.sh only.",
     ),
     "hexphi": dict(
         repo_id="LLM-Tuning-Safety/HEx-PHI", repo_type="dataset", required=True,
@@ -292,9 +301,9 @@ def check(name: str, rec: dict) -> None:
     d = Path(rec["local_dir"])
     c = {}
     try:
-        if name == "model":
+        if name in ("model", "model_7b"):
             cfg = json.loads((d / "config.json").read_text())
-            for k, v in MODEL_EXPECT.items():
+            for k, v in (MODEL_EXPECT if name == "model" else MODEL_7B_EXPECT).items():
                 c[k] = cfg.get(k)
                 if cfg.get(k) != v:
                     rec["status"] = "CHECK_FAILED"
@@ -337,7 +346,7 @@ def check(name: str, rec: dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", help="subset: model hexphi gpqa safetybench aime24 aime25 "
-                    "alpaca am advbench xstest star1 (xstest/star1 only when named)")
+                    "alpaca am advbench xstest star1 model_7b (xstest/star1/model_7b only when named)")
     args = ap.parse_args()
     want = set(args.only) if args.only else None
 
@@ -350,6 +359,8 @@ def main() -> int:
     for name, spec in HF_ASSETS.items():
         if want and name not in want:
             continue
+        if spec.get("named_only") and not (want and name in want):
+            continue                       # e.g. model_7b: only with --only model_7b
         print(f"-> {name}: {spec['repo_id']}")
         rec = fetch_hf_snapshot(name, spec)
         check(name, rec)

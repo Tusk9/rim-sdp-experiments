@@ -372,7 +372,8 @@ def main() -> int:
     if cfg.lr != 5e-5: flags.append(f"lr={cfg.lr} (paper 5e-5)")
     if cfg.gamma > 0 and cfg.gamma != 0.5: flags.append(f"gamma={cfg.gamma} (paper final 0.5)")
     if cfg.gamma > 0 and cfg.sdp_layers != tuple(range(19, 33)):
-        flags.append(f"sdp_layers={cfg.sdp_layers[0]}-{cfg.sdp_layers[-1]} (paper final 19-32)")
+        flags.append(f"sdp_layers={cfg.sdp_layers[0]}-{cfg.sdp_layers[-1]} "
+                     "(paper final: 3B 19-32, 7B 15-19)")
 
     set_seed(cfg.seed)
     dev = pick_device()
