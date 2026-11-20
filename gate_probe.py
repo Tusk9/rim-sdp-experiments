@@ -126,19 +126,24 @@ def probe(model, tok, texts, think_ids, dev, want_states: bool):
         for b in range(B):
             n = int(L[b])
             x[b, :n] = ids[b, :n]; x[b, n:n + k] = tid; m[b, :n + k] = 1
-        out = model(input_ids=x, attention_mask=m, use_cache=False,
-                    output_hidden_states=want_states)
-        logp = torch.log_softmax(out.logits.float(), -1)
+        # Memory: never materialise [B, T, vocab] logits (151k vocab -> ~13 GB at B=8 in
+        # fp32). Run the decoder body, then apply the LM head only at the k positions that
+        # predict the think tokens. Identical numbers to the full-logits computation.
+        causal = model.get_base_model() if hasattr(model, "get_base_model") else model
+        out = causal.model(input_ids=x, attention_mask=m, use_cache=False,
+                           output_hidden_states=want_states)
+        pos = (L - 1).unsqueeze(1) + torch.arange(k, device=dev).unsqueeze(0)   # [B, k]
+        rows = torch.arange(B, device=dev)
+        h_sel = out.last_hidden_state[rows.unsqueeze(1), pos]                  # [B, k, d]
+        logp = torch.log_softmax(causal.lm_head(h_sel).float(), -1)            # [B, k, V]
+        lp_all = logp.gather(-1, tid.view(1, k, 1).expand(B, k, 1)).squeeze(-1)  # [B, k]
         for b in range(B):
-            n = int(L[b])
-            pos = torch.arange(n - 1, n - 1 + k, device=dev)    # logits that predict think toks
-            lp = logp[b, pos, tid]
+            lp = lp_all[b]
             p1.append(float(lp[0].exp()))
             lseq.append(float(lp.sum()))
         if want_states:
-            rows = torch.arange(B, device=dev)
             hs_all.append(torch.stack([h[rows, L - 1].float() for h in out.hidden_states], 1).cpu())
-        del out, logp
+        del out, logp, h_sel
     return np.array(p1), np.array(lseq), (torch.cat(hs_all) if want_states else None)
 
 
