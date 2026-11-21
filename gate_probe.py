@@ -128,17 +128,19 @@ def probe(model, tok, texts, think_ids, dev, want_states: bool):
             x[b, :n] = ids[b, :n]; x[b, n:n + k] = tid; m[b, :n + k] = 1
         out = model(input_ids=x, attention_mask=m, use_cache=False,
                     output_hidden_states=want_states)
-        logp = torch.log_softmax(out.logits.float(), -1)
+        # Only the k positions that predict the think tokens are needed. Slicing before the
+        # fp32 log-softmax keeps memory at k x vocab per row instead of seq x vocab (the full
+        # [B, T, 151k] fp32 tensor ran out of memory on GPQA-length prompts).
         for b in range(B):
             n = int(L[b])
             pos = torch.arange(n - 1, n - 1 + k, device=dev)    # logits that predict think toks
-            lp = logp[b, pos, tid]
+            lp = torch.log_softmax(out.logits[b, pos].float(), -1)[torch.arange(k, device=dev), tid]
             p1.append(float(lp[0].exp()))
             lseq.append(float(lp.sum()))
         if want_states:
             rows = torch.arange(B, device=dev)
             hs_all.append(torch.stack([h[rows, L - 1].float() for h in out.hidden_states], 1).cpu())
-        del out, logp
+        del out
     return np.array(p1), np.array(lseq), (torch.cat(hs_all) if want_states else None)
 
 
