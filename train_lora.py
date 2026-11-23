@@ -345,6 +345,7 @@ def main() -> int:
     ap.add_argument("--gamma", type=float, help="SDP weight (0 = AM-SFT baseline; paper 0.5)")
     ap.add_argument("--sdp-layers", help="e.g. 19-32 (default) or 20-26")
     ap.add_argument("--sdp-direction", help="S file from extract_direction.py")
+    ap.add_argument("--seed", type=int, help="override 3407 (extra seeds; also pass on --resume)")
     args = ap.parse_args()
 
     cfg = Config()
@@ -361,6 +362,7 @@ def main() -> int:
         lo, hi = (int(x) for x in args.sdp_layers.split("-"))
         cfg.sdp_layers = tuple(range(lo, hi + 1))
     if args.sdp_direction: cfg.sdp_direction = args.sdp_direction
+    if args.seed is not None: cfg.seed = args.seed
     assert cfg.gamma >= 0
     assert cfg.effective_batch % cfg.per_device_batch == 0
 
@@ -370,6 +372,7 @@ def main() -> int:
     if cfg.effective_batch not in (8, 64): flags.append(f"effective_batch={cfg.effective_batch}")
     if cfg.smoke: flags.append("SMOKE TEST: 50 steps, accum 1 — not a baseline run")
     if cfg.lr != 5e-5: flags.append(f"lr={cfg.lr} (paper 5e-5)")
+    if cfg.seed != 3407: flags.append(f"seed={cfg.seed} (extra seed; main runs use 3407)")
     if cfg.gamma > 0 and cfg.gamma != 0.5: flags.append(f"gamma={cfg.gamma} (paper final 0.5)")
     if cfg.gamma > 0 and cfg.sdp_layers != tuple(range(19, 33)):
         flags.append(f"sdp_layers={cfg.sdp_layers[0]}-{cfg.sdp_layers[-1]} "
