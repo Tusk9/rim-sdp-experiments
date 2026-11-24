@@ -12,7 +12,7 @@ Replication of Zhao et al. (2026), *Mitigating Reasoning-Induced Misalignment vi
 | 1 | Base eval → AM-SFT LoRA (γ = 0) → eval: does RIM reproduce? | ✅ done: see [PHASE1_RESULTS.md](PHASE1_RESULTS.md) |
 | 1b | Epoch-1 snapshot (step 157) of the same trajectory: safety drop holds (HEx-PHI 34%), looping persists (GPQA 36% truncated) | ✅ done |
 | 2 | SDP (γ = 0.5, L19–L32) at step 157: harm back to base (2.7% vs 34%), no looping, but 0% thinking on HEx-PHI. See [PHASE2_RESULTS.md](PHASE2_RESULTS.md) | ✅ done; forced-thinking check next (`run_forcethink.sh`) |
-| Step 1 | SDP is safe when forced to reason (4.7% vs AM-SFT 36.7%, base 2.0%), but its 0% thinking on HEx-PHI is a **format gate**: it reasons only on math. Displacement sign resolved. See [STEP1_RESULTS.md](STEP1_RESULTS.md) | ✅ done; judge-disagreement check open |
+| Step 1 | SDP is safe when forced to reason (4.7% vs AM-SFT 36.7%, base 2.0%), but its 0% thinking on HEx-PHI is a **format gate**: it reasons only on math. Displacement sign resolved. See [STEP1_RESULTS.md](STEP1_RESULTS.md) | ✅ done (final-answer judge artifact found and fixed) |
 | Steps 2–4 | Judge robustness (Qi et al. prompt + second judge), CKA layer selection, probes, displacement-vs-harm Spearman, batch-8 retrain, γ sweep, STAR-1 mixing baseline. See [STEP2.md](STEP2.md) | code ready (`run_step2.sh`) |
 | 3 | Reasoning-format study (full CoT / Chain of Draft / no tags / answer only) | planned |
 
