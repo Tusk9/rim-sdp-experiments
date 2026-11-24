@@ -45,7 +45,8 @@ The SDP and base AUROCs are not meaningful, because P is ~0 on both sides. AM-SF
 | unforced | 2.7 | 34.0 | 2.7 |
 | unforced, harmful \| think | – | 40.9 | – |
 | **forced `<think>`, full response** | **2.0** [0.9, 4.3] | **36.7** [31.4, 42.3] | **4.7** [2.8, 7.7] |
-| forced, final answer only | 30.7 | 38.0 | 22.7 |
+| forced, final answer only, non-empty answers (corrected) | 11.9 (14/118) | 29.8 (64/215) | 8.9 (18/202) |
+| forced, final answer empty (everything inside `<think>`) | 60.7 | 28.3 | 32.7 |
 | forced, think unclosed | 12.3 | 28.3 | 12.3 |
 | AIME cue appended | 12.3 | **57.0** | 13.0 |
 | AIME cue, harmful \| think | – | 60.1 | 100 (n = 1) |
@@ -72,9 +73,13 @@ SDP doesn't over-refuse beyond base. AM-SFT under-refuses: it complies fully wit
 
 With a prompt-level harmful-vs-harmless direction at the matching token, AM-SFT moves HEx-PHI states strongly toward the harmless side, as the paper's account predicts. SDP barely moves. The Phase 2 positive sign was an artifact of mismatched positions.
 
-## Open issue: final-answer vs full-response judgments disagree under forcing
+## Resolved: final-answer vs full-response judgments under forcing
 
-Under forced thinking, final-answer-only harm is far above full-response harm for base (30.7 vs 2.0) and SDP (22.7 vs 4.7), but not for AM-SFT (38.0 vs 36.7). Unforced, the two metrics agree (Phase 1: 46.7 vs 47.3). Possible causes: the judge discounts a harmful final answer when the reasoning before it voices concerns, or a short final answer judged without its reasoning looks worse than it is. **The ranking SDP ≤ base < AM-SFT holds under both metrics**, but the absolute numbers depend on which is right. `judge_disagreement.py` lists the disagreeing prompts with the judge's own reasons (CPU, no new API calls) for a manual check.
+The first report showed final-answer-only harm far above full-response harm (base 30.7 vs 2.0, SDP 22.7 vs 4.7). `judge_disagreement.py` traced this to **empty final answers**. Under forcing, base and SDP often put the whole answer inside `<think>` (base 182/300, SDP 98/300), leaving nothing after `</think>`. gpt-4o-mini scored those **empty** responses as harmful (5) about half the time (base 78/182, AM-SFT 50/85, SDP 50/98). That is a judge artifact.
+
+With empty answers excluded, final-answer-only harm is base 11.9%, SDP 8.9%, AM-SFT 29.8%. **The ranking SDP ≤ base < AM-SFT holds on every valid metric.** The full response stays the primary metric, because under forcing that's where the answer is. The remaining AM-SFT disagreements are real answers and split both ways (19 vs 15 prompts): ordinary judge noise.
+
+Fix: `eval_harness.py` no longer sends empty final answers to the judge, the same rule `score_xstest` already used. `harmful_final_answer_only` is now over non-empty answers, and `final_answer_empty` is reported. Earlier results.json files keep the old definition.
 
 ## Caveats
 
@@ -85,6 +90,6 @@ Under forced thinking, final-answer-only harm is far above full-response harm fo
 
 ## Next
 
-1. Manual check of the judge disagreement (`judge_disagreement.py`, then read ~20 rows per model locally).
+1. Judge robustness: re-score with the Qi et al. prompt and gpt-4o (`rejudge.py`, `run_step2.sh STAGES=rejudge`).
 2. γ sweep (0.1, 0.05; `run_step2.sh`): does a weaker penalty keep reasoning on non-math prompts while staying safe? The ideal SDP model thinks on benign non-math prompts and stays near base harm when it does.
 3. Phase 3, the reasoning-format study. The format-gate finding makes "does SDP restrict *where* the model reasons?" a measured outcome for every arm.
