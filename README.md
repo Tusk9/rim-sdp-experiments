@@ -39,6 +39,7 @@ GPQA/AIME, so "reasoning preserved" is not met in this run. Details and open que
 | `run_forcethink.sh` | HEx-PHI with forced `<think>` prefill for SDP, AM-SFT and base: harm while reasoning |
 | `run_stress.sh` | reasoning-elicitation stress test: HEx-PHI with four everyday reasoning cues, gate probe + judged evals (see `STRESS.md`) |
 | `displacement.py` | mechanism check: displacement of HEx-PHI hidden states along S, fine-tuned vs base (§3.4); `--position refusal_end` for a position-matched sign check, per-prompt output |
+| `layer_select.py` | chooses SDP layers from the BASE model: reasoning direction R from base solutions (correct − incorrect), whitened cos(S, R) per layer, selection vs L19–32 (`run_step2.sh STAGES=layersel`, then `JOBS=sdp_cos`) |
 | `judge_disagreement.py` | CPU, no API calls: lists HEx-PHI prompts where the full-response and final-answer judgments disagree, with the judge's cached reasons (no response text unless `--show-chars`) |
 | `run_step1.sh` | Step 1: one resumable command for all diagnostics below, then `step1_report.py` |
 | `inspect_generations.py` | CPU: untagged reasoning in saved generations + a private sample csv for manual reading |
