@@ -8,6 +8,9 @@
 #             and (b) a second judge model (JUDGE2_MODEL), against the original scores
 #   analysis  light GPU: hidden states for base / AM-SFT / SDP, CKA layer selection,
 #             harm-perception + safety-decision probes, displacement-vs-harm Spearman
+#   layersel  GPU ~1 h: choose SDP layers from the BASE model (layer_select.py): sample base
+#             solutions to AM math problems, reasoning direction R (correct - incorrect),
+#             whitened cos(S, R) per layer, selection vs L19-32. Needed by JOBS=sdp_cos.
 #   train     one train -> eval cycle per job in JOBS (epoch 1, then the Phase 1/2 eval
 #             set + forced thinking + benign/XSTest)
 #
@@ -18,6 +21,8 @@
 #   sdp_g0.05    SDP gamma 0.05                                     stop 157
 #   sdp_g1.0     SDP gamma 1.0                                      stop 157
 #   star1mix50   AM-SFT + 50 STAR-1 examples (baseline, item 16)    stop = epoch 1
+#   sdp_cos      SDP gamma 0.5 on the layers chosen by stage layersel  stop 157
+#                (LAYERSEL_RULE=core (default) | significant; skipped if it equals L19-32)
 #   e.g. JOBS="amsft_eb8"  then, if truncation drops below ~10%,  JOBS="sdp_eb8"
 #
 # Required env: HF_TOKEN OPENAI_API_KEY.  Optional: HF_SYNC_REPO, JUDGE_RPM (9),
@@ -96,6 +101,14 @@ if want rejudge && ! done_ rejudge; then
 fi
 
 # ---- analysis ------------------------------------------------------------------------
+if want layersel && ! done_ layersel; then
+  echo "== [layersel] SDP layers from the base model: cos(S, R) per layer"
+  [ -f runs/direction/S_advbench.pt ] || python extract_direction.py --summary-layers "$SDP_LAYERS"
+  [ -f runs/layersel/solutions.jsonl ] || python layer_select.py gen ${EVAL_EXTRA:+--n-problems 40 --max-new 64 --backend hf}
+  python layer_select.py directions ${EVAL_EXTRA:+--boot 100}
+  mark layersel
+fi
+
 if want analysis && ! done_ analysis; then
   echo "== [analysis] hidden states, CKA, probes, displacement vs harm"
   [ -n "$(ls assets/alpaca/*.json 2>/dev/null)" ] || python download_assets.py --only alpaca
@@ -135,10 +148,25 @@ PY
 }
 run_job() {
   local job=$1 data="data/am_sft_L16384_n10000_truncate" eb=64 gamma=0 extra=()
+  SDP_LAYERS_JOB=""
   case "$job" in
     amsft_eb8)  eb=8 ;;
     sdp_eb8)    eb=8; gamma=0.5 ;;
     sdp_g*)     gamma="${job#sdp_g}" ;;
+    sdp_cos)
+      [ -f runs/layersel/selection.json ] || { echo "ERROR: run STAGES=layersel first"; exit 1; }
+      gamma=0.5
+      local layers
+      layers=$(python - "${LAYERSEL_RULE:-core}" <<'PY'
+import json, sys
+rule = {"core": "selection_core_block", "significant": "selection_significant"}[sys.argv[1]]
+sel = json.load(open("runs/layersel/selection.json"))[rule]["layers"]
+print(f"{min(sel)}-{max(sel)}" if sel else "")   # train_lora takes a contiguous range
+PY
+)
+      if [ -z "$layers" ]; then echo "== [train sdp_cos] no layers selected (rule ${LAYERSEL_RULE:-core}); skipping"; return 0; fi
+      if [ "$layers" = "$SDP_LAYERS" ]; then echo "== [train sdp_cos] selection = $SDP_LAYERS (same as Phase 2); skipping"; return 0; fi
+      job="sdp_cos_M${layers}"; SDP_LAYERS_JOB="$layers" ;;
     star1mix50)
       [ -f assets/star1/STAR-1.json ] || python download_assets.py --only star1
       data="data/am_sft_L16384_n10000_truncate_star1-50_s3407"
@@ -147,7 +175,7 @@ run_job() {
   esac
   [ -d "$data" ] || { echo "ERROR: $data missing (run prep_am_data.py / restore)"; exit 1; }
   if [ "$gamma" != "0" ]; then
-    extra+=(--sdp-layers "$SDP_LAYERS")
+    extra+=(--sdp-layers "${SDP_LAYERS_JOB:-$SDP_LAYERS}")
     [ -f runs/direction/S_advbench.pt ] || python extract_direction.py --summary-layers "$SDP_LAYERS"
   fi
   local stop; stop=$(epoch1_steps "$data" "$eb")
